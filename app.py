@@ -1,104 +1,128 @@
-import gradio as gr
+import os, re, gradio as gr
 import whisperx
-import torch
-import pysubs2
-import ffmpeg
-from io import BytesIO
-import tempfile
-import os
 
-# Load model once (free on HF Spaces GPU/CPU)
-device = "cuda" if torch.cuda.is_available() else "cpu"
-audio_model = whisperx.load_model("base", device, compute_type="float16" if device == "cuda" else "int8")
-align_model, metadata = whisperx.load_align_model(language_code="es", device=device)  # Default Spanish; swap for "hu" Hungarian
+# ---------- helpers ----------
+LANG_MAP = {
+    # common names to codes (add more if you like)
+    "auto": None, "auto-detect": None, "automatic": None,
+    "english": "en", "spanish": "es", "chinese": "zh", "mandarin": "zh",
+    "cantonese": "yue", "french": "fr", "german": "de", "italian": "it",
+    "japanese": "ja", "korean": "ko", "portuguese": "pt", "russian": "ru",
+    "arabic": "ar", "hindi": "hi", "bengali": "bn", "urdu": "ur",
+}
 
-def extract_audio(video_file):
-    """Extract audio from video if uploaded (optional)."""
-    if video_file is not None and not str(video_file).endswith('.wav') and not str(video_file).endswith('.mp3'):
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-            stream = ffmpeg.input(video_file.name)
-            stream = ffmpeg.output(stream, tmp.name, acodec='pcm_s16le', ar=16000)
-            ffmpeg.run(stream, overwrite_output=True, quiet=True)
-            return tmp.name
-    return video_file.name if video_file else None
+def normalize_lang(s: str | None):
+    """Return a 2/3-letter code or None for auto."""
+    if not s:
+        return None
+    t = s.strip().lower()
+    if t in LANG_MAP:
+        return LANG_MAP[t]
+    # Accept labels like "es (Spanish)" or "Spanish (es)"
+    # -> pull the 2-3 letter code if present
+    m = re.search(r"\b([a-z]{2,3})\b", t)
+    if m:
+        return m.group(1)
+    # Accept first token "es" from "es Spanish"
+    tok = t.split()[0]
+    if tok in LANG_MAP:
+        return LANG_MAP[tok]
+    if 2 <= len(tok) <= 3:
+        return tok
+    return None
 
-def transcribe_and_align(audio_file, language):
-    """Transcribe with word-level timestamps."""
-    audio = whisperx.load_audio(audio_file)
-    result = audio_model.transcribe(audio, language=language)
-    aligned = whisperx.align(result["segments"], align_model, metadata, audio, device, return_char_alignments=False)
-    return aligned["segments"]  # List of dicts with words/timestamps
+# Lazy-load model (keeps startup snappy)
+_asr_model = None
+def get_asr_model():
+    global _asr_model
+    if _asr_model is None:
+        # CPU-friendly default; HF Spaces CPU hardware
+        _asr_model = whisperx.load_model("small", device="cpu")
+    return _asr_model
 
-def generate_ass(subtitle_data, edits):
-    """Generate ASS with per-letter styles from edits dict (e.g., {'word_index': {'char_pos': {'font': 'Arial', 'color': '#FF0000'}}} )."""
-    ass = pysubs2.SSAFile.from_string('[Script Info]\nTitle: Generated\n[Events]\nFormat: Start, End, Style, Text\n')
-    style = pysubs2.SSAStyle(Fontname='Arial', Fontsize=24, PrimaryColour='&H00FFFFFF', OutlineColour='&H00000000')
-    ass.styles['Default'] = style
-    for seg in subtitle_data:
-        start, end = seg['start'], seg['end']
-        text = ' '.join([w['word'] for w in seg['words']])
-        # Apply edits: For simplicity, wrap letters in tags if edited
-        formatted_text = text
-        if seg in edits:  # Pseudo-edits; in full app, parse from UI
-            for word_idx, word_edits in edits.get(seg, {}).items():
-                for char_pos, char_edit in word_edits.items():
-                    char = text[char_pos]
-                    formatted_text = formatted_text.replace(char, f'{{fn{char_edit.get("font","Arial")}\\c&{char_edit.get("color","#FFFFFF")}&}}{char}', 1)
-        event = pysubs2.SSAEvent(start=start*1000, end=end*1000, text=formatted_text, style='Default')
-        ass.events.append(event)
-    return ass.to_string('ass')
+def transcribe_and_align(audio_path, language_code):
+    model = get_asr_model()
+    result = model.transcribe(audio_path, language=language_code)
+    # Return plain text draft plus segments for future styling/burn-in
+    text = " ".join(seg["text"].strip() for seg in result["segments"])
+    return result["segments"], text
 
-def main_interface(audio_or_video, language, font_edits, color_edits):
-    if not audio_or_video:
-        return "Upload audio/video.", None, None, None
-    
-    audio_path = extract_audio(audio_or_video)
-    segments = transcribe_and_align(audio_path, language)
-    
-    # Timeline: Simple HTML with audio player + synced text (use JS for basic waveform)
-    timeline_html = "<audio controls src='file://" + audio_path + "'></audio><div id='timeline'>"
-    for i, seg in enumerate(segments):
-        start = seg['start']
-        text = ' '.join([w['word'] for w in seg['words']])
-        timeline_html += f"<div style='margin-top:{start*10}px; border-left:2px solid blue; padding:5px;'><strong>{start:.1f}s:</strong> {text}</div>"
-    timeline_html += "</div><script>/* Basic sync: Play audio, highlight on time */ console.log('Timeline ready');</script>"
-    
-    # Edits preview: Basic form for per-letter (expandable; here, demo for first word)
-    edits_html = "<h3>Edit Per Letter (Demo for first segment):</h3><form>"
-    if segments:
-        first_word = segments[0]['words'][0]['word']
-        for j, char in enumerate(first_word):
-            edits_html += f"Char '{char}': <input type='text' placeholder='Font' id='font_{j}'><input type='color' id='color_{j}' value='#FFFFFF'><br>"
-    edits_html += "</form><button onclick='applyEdits()'>Preview</button><div id='preview'></div>"
-    
-    # Generate sample ASS (with dummy edits)
-    dummy_edits = {0: {0: {'font': 'Arial', 'color': '#FF0000'}}}  # Example: First char red
-    ass_content = generate_ass(segments, dummy_edits)
-    
-    if os.path.exists(audio_path) and audio_path != audio_or_video.name:
-        os.unlink(audio_path)  # Cleanup
-    
-    return timeline_html, edits_html, ass_content, f"Transcribed {len(segments)} segments in {language}."
+# ---------- UI logic (with right-side settings) ----------
+FONT_CHOICES = [
+    "Default", "Arial", "Roboto", "Open Sans", "Lato", "Noto Sans", "Montserrat",
+]
+LANG_CHOICES = [
+    ("Auto-detect", "auto"),
+    ("English (en)", "en"),
+    ("Spanish (es)", "es"),
+    ("French (fr)", "fr"),
+    ("German (de)", "de"),
+    ("Italian (it)", "it"),
+    ("Portuguese (pt)", "pt"),
+    ("Russian (ru)", "ru"),
+    ("Chinese (zh)", "zh"),
+    ("Cantonese (yue)", "yue"),
+    ("Japanese (ja)", "ja"),
+    ("Korean (ko)", "ko"),
+    ("Hindi (hi)", "hi"),
+]
 
-# Gradio UI
-with gr.Blocks(title="Auto Subtitle Editor") as demo:
-    gr.Markdown("# Free Online Subtitle Editor with WhisperX")
+def main_interface(audio, language_ui, font_family, font_size, text_color, outline_color, outline_w):
+    if audio is None:
+        raise gr.Error("Please upload an audio/video file.")
+    lang_code = normalize_lang(language_ui)
+    segments, text = transcribe_and_align(audio, lang_code)
+    # Preview-only CSS style block for the transcript (burn-in not shown here)
+    styled = f"""
+<div style="
+  font-family:{'inherit' if font_family=='Default' else font_family}, sans-serif;
+  font-size:{int(font_size)}px;
+  line-height:1.35;
+  color:{text_color};
+  text-shadow:
+    -{outline_w}px 0 {outline_color},
+    {outline_w}px 0 {outline_color},
+    0 -{outline_w}px {outline_color},
+    0 {outline_w}px {outline_color};
+">
+{text}
+</div>
+"""
+    return styled, segments
+
+custom_css = """
+/* cleaner look + right panel sizing */
+.gradio-container { max-width: 1200px !important; }
+.settings-card { position: sticky; top: 12px; border-radius: 16px; }
+"""
+
+with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
+    gr.Markdown("# 🎨 Colorvideo Subs\nTranscribe + style subtitles. Pick fonts & sizes on the right →")
+
     with gr.Row():
-        audio_input = gr.File(label="Upload Audio/Video", file_types=[".mp3", ".wav", ".mp4"])
-        lang_dropdown = gr.Dropdown(choices=["es (Spanish)", "hu (Hungarian)"], value="es (Spanish)", label="Language")
-    edit_font = gr.Textbox(label="Global Font (or per-letter in preview)")
-    edit_color = gr.ColorPicker(label="Global Color")
-    transcribe_btn = gr.Button("Transcribe & Generate Timeline")
-    timeline_out = gr.HTML(label="Synced Timeline (Waveform + Text)")
-    edits_out = gr.HTML(label="Per-Letter Editor Preview")
-    ass_out = gr.Textbox(label="Downloadable ASS File (Fonts/Colors Baked In)", lines=10)
-    download_ass = gr.File(label="Download ASS")
-    
-    transcribe_btn.click(
-        main_interface, inputs=[audio_input, lang_dropdown, edit_font, edit_color],
-        outputs=[timeline_out, edits_out, ass_out, gr.Textbox(visible=False)]
+        with gr.Column(scale=3):
+            audio = gr.Audio(label="Audio or Video", type="filepath")
+            language = gr.Dropdown(choices=LANG_CHOICES, value="auto", label="Language")
+            run = gr.Button("Run", variant="primary")
+
+            transcript_html = gr.HTML(label="Preview")
+            segments_json = gr.JSON(label="Segments (for debugging / export)")
+
+        # RIGHT SETTINGS PANEL
+        with gr.Column(scale=1):
+            with gr.Group(elem_classes=["settings-card"]):
+                gr.Markdown("### Subtitle Settings")
+                font_family = gr.Dropdown(FONT_CHOICES, value="Default", label="Font")
+                font_size   = gr.Slider(14, 72, value=32, step=1, label="Font size")
+                text_color  = gr.ColorPicker(value="#FFFFFF", label="Text color")
+                outline_color = gr.ColorPicker(value="#000000", label="Outline color")
+                outline_w   = gr.Slider(0, 4, value=2, step=1, label="Outline width (px)")
+
+    run.click(
+        main_interface,
+        inputs=[audio, language, font_family, font_size, text_color, outline_color, outline_w],
+        outputs=[transcript_html, segments_json]
     )
-    # Add download logic if needed
 
 if __name__ == "__main__":
     demo.launch()
