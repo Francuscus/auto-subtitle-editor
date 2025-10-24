@@ -1,6 +1,6 @@
 gradio==4.44.0
 whisperx==3.7.4
-faster-whisper>=1.0.2,<2
+faster-whisper>=1.2.0,<2
 av>=12,<13
 torch==2.8.0
 torchaudio==2.8.0
