@@ -45,7 +45,6 @@ def get_asr_model():
     try:
         _asr_model = whisperx.load_model("small", device=device, compute_type=compute)
     except ValueError as e:
-        # Fallback if int8 kernels aren’t available on this CPU
         if "compute type" in str(e).lower():
             fallback = "int16" if device == "cpu" else "float32"
             _asr_model = whisperx.load_model("small", device=device, compute_type=fallback)
@@ -56,57 +55,44 @@ def get_asr_model():
 # ---------------- transcription ----------------
 def transcribe(audio_path, language_code):
     model = get_asr_model()
-    # Ask for word timestamps if backend supports it; WhisperX passes through to faster-whisper
-    result = model.transcribe(audio_path, language=language_code, word_timestamps=True)
-    # Join plain text for preview
+    # NOTE: removed word_timestamps=True to match this WhisperX version
+    result = model.transcribe(audio_path, language=language_code)
     text = " ".join(seg["text"].strip() for seg in result["segments"])
     return result["segments"], text
 
 # ---------------- lyrics retiming (simple) ----------------
 def split_lyrics(text: str):
-    # split on new lines; if user pasted a paragraph, split on sentences
     raw_lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
     if len(raw_lines) >= 2:
         return raw_lines
-    # fallback: sentence-ish split
     parts = re.split(r'(?<=[.!?])\s+', text.strip())
     return [p.strip() for p in parts if p.strip()]
 
 def retime_lyrics_to_segments(lyrics_lines, segments):
-    """Map each lyric line to the available segment durations (greedy, linear).
-       Keeps segment boundaries; multiple lines may share a segment time if fewer segments."""
     if not segments or not lyrics_lines:
         return segments
 
-    # Collect segment timing
     seg_times = [(s["start"], s["end"]) for s in segments]
     seg_durs = [max(0.01, e - st) for st, e in seg_times]
     total_dur = sum(seg_durs)
 
-    # Build a cumulative “timeline” of segment bins
     bins = []
     acc = 0.0
     for dur in seg_durs:
         bins.append((acc, acc+dur))
         acc += dur
 
-    # Divide total duration into N lyric slices
     N = len(lyrics_lines)
     slice_edges = [i * (total_dur / N) for i in range(N+1)]
 
     def time_in_bins(t):
-        # map absolute time in [0,total_dur] back to real [start,end] using bins
-        # find which bin contains t
         for idx,(b0,b1) in enumerate(bins):
             if b0 <= t <= b1 or (idx==len(bins)-1 and t> b1):
-                # fraction within this bin
                 frac = 0.0 if b1==b0 else (t - b0) / (b1 - b0)
                 real_start, real_end = seg_times[idx]
                 return real_start + frac*(real_end - real_start)
-        # fallback: end of last seg
         return seg_times[-1][1]
 
-    # Build retimed “segments-like” dicts for lyrics
     out = []
     for i in range(N):
         t0 = time_in_bins(slice_edges[i])
@@ -136,22 +122,19 @@ def segments_to_srt(segments):
         lines.append(str(i))
         lines.append(f"{fmt_time(start)} --> {fmt_time(end)}")
         lines.append(text)
-        lines.append("")  # blank
+        lines.append("")
     return "\n".join(lines)
 
 def segments_to_ass(segments, font, size_px, text_color, outline_color, outline_w):
-    # Convert HTML colors (#RRGGBB) to ASS BGR format (&HBBGGRR&)
     def hex_to_ass(c):
         c = c.lstrip("#")
         if len(c) == 3:
             c = "".join([ch*2 for ch in c])
-        # ASS is BGR and &HAABBGGRR (we’ll keep alpha opaque AA=00)
         rr = c[0:2]; gg = c[2:4]; bb = c[4:6]
         return f"&H00{bb.upper()}{gg.upper()}{rr.upper()}"
 
     subs = pysubs2.SSAFile()
     subs.info["Collisions"] = "Normal"
-    # Create a style
     style = pysubs2.SSAStyle(
         fontname=("Arial" if font == "Default" else font),
         fontsize=int(size_px),
@@ -160,10 +143,10 @@ def segments_to_ass(segments, font, size_px, text_color, outline_color, outline_
         backcolor="&H00000000",
         bold=False, italic=False, underline=False, strikeout=False,
         scale_x=100, scale_y=100, spacing=0, angle=0,
-        borderstyle=1,  # opaque box=3; outline=1
+        borderstyle=1,
         outline=int(outline_w),
         shadow=0,
-        alignment=2,  # bottom-center
+        alignment=2,
         marginl=10, marginr=10, marginv=20,
         encoding=1
     )
@@ -200,16 +183,13 @@ def run_pipeline(audio, language_ui, font_family, font_size, text_color, outline
         raise gr.Error("Please upload an audio or video file (mp3/wav/mp4).")
 
     lang_code = normalize_lang(language_ui)
-
     segments, text = transcribe(audio, lang_code)
 
     if use_lyrics and lyrics_text and lyrics_text.strip():
         lyric_lines = split_lyrics(lyrics_text)
-        # replace segments with retimed lyric lines
         segments = retime_lyrics_to_segments(lyric_lines, segments)
         text = "\n".join(l for l in lyric_lines)
 
-    # Build preview HTML
     styled = f"""
 <div style="
   font-family:{'inherit' if font_family=='Default' else font_family}, sans-serif;
@@ -240,7 +220,6 @@ LANG_CHOICES = [
 ]
 
 custom_css = """
-/* Wider container and clear contrast */
 .gradio-container { max-width: 1220px !important; }
 body { background: #0e1116; }
 #app-title { color: #f2f5f9 !important; }
