@@ -6,7 +6,7 @@ import whisperx
 
 # =========================
 # Version tag (helps confirm deployment)
-APP_TITLE = "🎨 Colorvideo Subs — v0.5"
+APP_TITLE = "CCC Colorvideo Subs — v0.5"
 # =========================
 
 # ---------- Language helpers ----------
