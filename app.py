@@ -33,12 +33,32 @@ def normalize_lang(s: str | None):
 
 # Lazy-load model (keeps startup snappy)
 _asr_model = None
+# at top of file if not already present
+import torch
+import whisperx
+
+_asr_model = None
+
 def get_asr_model():
     global _asr_model
-    if _asr_model is None:
-        # CPU-friendly default; HF Spaces CPU hardware
-        _asr_model = whisperx.load_model("small", device="cpu")
+    if _asr_model is not None:
+        return _asr_model
+
+    use_cuda = torch.cuda.is_available()
+    device = "cuda" if use_cuda else "cpu"
+    compute = "float16" if use_cuda else "int8"   # <-- key: int8 on CPU
+
+    try:
+        _asr_model = whisperx.load_model("small", device=device, compute_type=compute)
+    except ValueError as e:
+        # Safety fallback in case the CPU lacks AVX2 or int8 kernels
+        if "compute type" in str(e).lower():
+            fallback = "int16" if device == "cpu" else "float32"
+            _asr_model = whisperx.load_model("small", device=device, compute_type=fallback)
+        else:
+            raise
     return _asr_model
+
 
 def transcribe_and_align(audio_path, language_code):
     model = get_asr_model()
