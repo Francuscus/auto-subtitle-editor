@@ -563,52 +563,6 @@ def create_app():
                 traceback.print_exc()
                 return error_msg, [], f"<p style='color: red;'>{error_msg}</p>", font_fam, font_sz
         
-        def update_preview(subtitles):
-            if not subtitles:
-                return "<p>No subtitles to preview</p>"
-            editor = create_interactive_editor(subtitles)
-            return editor
-        
-        def apply_color_edits(color_text, subtitles):
-            """Apply color edits from simple text format"""
-            if not subtitles or not color_text:
-                return subtitles, create_interactive_editor(subtitles) if subtitles else "<p>No data</p>"
-            
-            # Parse the text edits
-            lines = color_text.strip().split('\n')
-            for line in lines:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                
-                try:
-                    # Parse format: "1 | 0 | #FF0000"
-                    parts = [p.strip() for p in line.split('|')]
-                    if len(parts) != 3:
-                        continue
-                    
-                    line_num = int(parts[0]) - 1  # Convert to 0-based
-                    word_idx = int(parts[1])
-                    color = parts[2]
-                    
-                    # Validate
-                    if line_num < 0 or line_num >= len(subtitles):
-                        continue
-                    if word_idx < 0 or word_idx >= len(subtitles[line_num].get('colors', [])):
-                        continue
-                    if not color.startswith('#'):
-                        continue
-                    
-                    # Apply the color
-                    subtitles[line_num]['colors'][word_idx] = color
-                    
-                except (ValueError, IndexError):
-                    continue
-            
-            # Update preview
-            editor = create_interactive_editor(subtitles)
-            return subtitles, editor
-        
         def do_export_srt(subtitles):
             if not subtitles:
                 gr.Warning("No subtitles. Transcribe first.")
@@ -629,9 +583,6 @@ def create_app():
             inputs=[audio_input, language_dropdown, words_per_line, font_family, font_size],
             outputs=[status_text, subtitles_state, editor_html, font_family_state, font_size_state]
         )
-        
-        update_preview_btn.click(
-            fn=update_preview,
         
         export_srt_btn.click(
             fn=do_export_srt,
