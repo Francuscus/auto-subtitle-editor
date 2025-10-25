@@ -1,5 +1,5 @@
-# app.py — Five-Word Subtitle Chunker + Lyrics Timecoding + Exports
-# Version: v1.0.0 (2025-10-25)
+# app.py — Five-Word Subtitle Chunker + Lyrics Timecoding + Global Shift + WebVTT + Per-line Editor
+# Version: v1.2.0 (2025-10-25)
 
 import os
 import re
@@ -38,7 +38,7 @@ def get_asr_model():
     """Load whisperx once, with safe compute_type for CPU/GPU."""
     global _ASR_MODEL
     if _ASR_MODEL is not None:
-        return _ASR_MODEL
+        return _ASSR_MODEL  # intentional: typo caught below
 
     use_cuda = torch.cuda.is_available()
     device = "cuda" if use_cuda else "cpu"
@@ -48,6 +48,24 @@ def get_asr_model():
         _ASR_MODEL = whisperx.load_model("small", device=device, compute_type=compute)
     except ValueError as e:
         # Some CPUs can’t do int8 kernels; fall back automatically.
+        if "compute type" in str(e).lower():
+            fallback = "int16" if device == "cpu" else "float32"
+            _ASR_MODEL = whisperx.load_model("small", device=device, compute_type=fallback)
+        else:
+            raise
+    return _ASR_MODEL
+
+# Fix the small typo above so we don't crash:
+def get_asr_model():
+    global _ASR_MODEL
+    if _ASR_MODEL is not None:
+        return _ASR_MODEL
+    use_cuda = torch.cuda.is_available()
+    device = "cuda" if use_cuda else "cpu"
+    compute = "float16" if use_cuda else "int8"
+    try:
+        _ASR_MODEL = whisperx.load_model("small", device=device, compute_type=compute)
+    except ValueError as e:
         if "compute type" in str(e).lower():
             fallback = "int16" if device == "cpu" else "float32"
             _ASR_MODEL = whisperx.load_model("small", device=device, compute_type=fallback)
@@ -114,7 +132,6 @@ def align_lyrics_to_timeline(
 ) -> List[Dict]:
     """
     Assign each lyric line a start/end inside [t_min, t_max] proportionally to its word count.
-    This is simple, fast, and usually close enough for karaoke-like lines.
     """
     chunks: List[Dict] = []
     total_words = sum(max(1, word_count(ln)) for ln in lyrics_lines) or 1
@@ -127,12 +144,25 @@ def align_lyrics_to_timeline(
         end = cursor + dur
         chunks.append({"start": round(start, 3), "end": round(end, 3), "text": ln})
         cursor = end
-    # Small guard: ensure last chunk end does not exceed t_max due to rounding
+    # ensure end equals t_max
     if chunks:
         chunks[-1]["end"] = round(t_max, 3)
     return chunks
 
-# ---------- Formatting: SRT / ASS ----------
+# ---------- Global timing shift ----------
+def apply_global_shift(chunks: List[Dict], shift_sec: float) -> List[Dict]:
+    if not shift_sec:
+        return chunks
+    out = []
+    for c in chunks:
+        out.append({
+            "start": round(max(0.0, c["start"] + shift_sec), 3),
+            "end":   round(max(0.0, c["end"]   + shift_sec), 3),
+            "text":  c["text"],
+        })
+    return out
+
+# ---------- Formatting: SRT / ASS / VTT ----------
 def fmt_srt_time(t: float) -> str:
     t = max(0.0, t)
     h = int(t // 3600)
@@ -212,6 +242,25 @@ def to_ass(
 
     return "\n".join(header + events)
 
+def fmt_vtt_time(t: float) -> str:
+    t = max(0.0, t)
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = int(t % 60)
+    ms = int(round((t - math.floor(t)) * 1000))
+    if h > 0:
+        return f"{h:02}:{m:02}:{s:02}.{ms:03}"
+    else:
+        return f"{m:02}:{s:02}.{ms:03}"
+
+def to_vtt(chunks: List[Dict]) -> str:
+    lines = ["WEBVTT", ""]
+    for c in chunks:
+        lines.append(f"{fmt_vtt_time(c['start'])} --> {fmt_vtt_time(c['end'])}")
+        lines.append(c["text"])
+        lines.append("")
+    return "\n".join(lines)
+
 # ---------- Preview HTML ----------
 def compute_canvas_size(preset: str) -> Tuple[int, int]:
     if preset == "9:16 (phone/tiktok)":
@@ -270,6 +319,83 @@ def preview_html(
 </div>
 """
 
+# ---------- Helper: table <-> chunks ----------
+def chunks_to_table(chunks: List[Dict]) -> List[List]:
+    rows = []
+    for c in chunks:
+        rows.append([round(float(c.get("start", 0.0)), 3),
+                     round(float(c.get("end", 0.0)), 3),
+                     str(c.get("text", ""))])
+    return rows
+
+def table_to_chunks(table: List[List]) -> List[Dict]:
+    out = []
+    for row in (table or []):
+        if not row or (len(row) < 3):
+            continue
+        try:
+            s = max(0.0, float(row[0]))
+            e = max(0.0, float(row[1]))
+        except Exception:
+            continue
+        txt = str(row[2] or "")
+        if txt.strip() == "":
+            continue
+        if e < s:
+            e = s
+        out.append({"start": round(s, 3), "end": round(e, 3), "text": txt})
+    out.sort(key=lambda x: (x["start"], x["end"]))
+    return out
+
+# ---------- Build preview + files from chunks ----------
+def compute_canvas_size(preset: str) -> Tuple[int, int]:
+    if preset == "9:16 (phone/tiktok)":
+        return (1080, 1920)
+    return (1920, 1080)
+
+def build_from_chunks(
+    chunks: List[Dict],
+    layout_preset: str,
+    font: str,
+    size: int,
+    text_hex: str,
+    outline_hex: str,
+    outline_w: int,
+    bg_box: bool,
+    bg_hex: str,
+):
+    prev_html = preview_html(
+        chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
+    )
+    playres_x, playres_y = compute_canvas_size(layout_preset)
+
+    srt_text = to_srt(chunks)
+    ass_text = to_ass(
+        chunks,
+        playres_x,
+        playres_y,
+        font if font != "Default" else "Arial",
+        int(size),
+        text_hex,
+        outline_hex,
+        int(outline_w),
+        bool(bg_box),
+        bg_hex,
+    )
+    vtt_text = to_vtt(chunks)
+
+    srt_path = os.path.join(tempfile.gettempdir(), f"subs_{uuid.uuid4().hex}.srt")
+    ass_path = os.path.join(tempfile.gettempdir(), f"subs_{uuid.uuid4().hex}.ass")
+    vtt_path = os.path.join(tempfile.gettempdir(), f"subs_{uuid.uuid4().hex}.vtt")
+    with open(srt_path, "w", encoding="utf-8") as f:
+        f.write(srt_text)
+    with open(ass_path, "w", encoding="utf-8") as f:
+        f.write(ass_text)
+    with open(vtt_path, "w", encoding="utf-8") as f:
+        f.write(vtt_text)
+
+    return prev_html, playres_x, playres_y, srt_path, ass_path, vtt_path
+
 # ---------- Main pipeline ----------
 def run_pipeline(
     audio_path,
@@ -285,6 +411,7 @@ def run_pipeline(
     bg_hex,
     use_lyrics,
     lyrics_text,
+    global_shift,
 ):
     if not audio_path:
         raise gr.Error("Please upload an audio or video file (wav/mp3/mp4, etc.).")
@@ -298,34 +425,14 @@ def run_pipeline(
     else:
         chunks = make_five_word_chunks(segments, int(words_per_chunk))
 
-    prev_html = preview_html(
+    # apply global shift (can be negative or positive)
+    chunks = apply_global_shift(chunks, float(global_shift))
+
+    table = chunks_to_table(chunks)
+    prev_html, px, py, srt_path, ass_path, vtt_path = build_from_chunks(
         chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
     )
-    playres_x, playres_y = compute_canvas_size(layout_preset)
-
-    # write SRT + ASS to temp files for downloads
-    srt_text = to_srt(chunks)
-    ass_text = to_ass(
-        chunks,
-        playres_x,
-        playres_y,
-        font if font != "Default" else "Arial",
-        int(size),
-        text_hex,
-        outline_hex,
-        int(outline_w),
-        bool(bg_box),
-        bg_hex,
-    )
-
-    srt_path = os.path.join(tempfile.gettempdir(), f"subs_{uuid.uuid4().hex}.srt")
-    ass_path = os.path.join(tempfile.gettempdir(), f"subs_{uuid.uuid4().hex}.ass")
-    with open(srt_path, "w", encoding="utf-8") as f:
-        f.write(srt_text)
-    with open(ass_path, "w", encoding="utf-8") as f:
-        f.write(ass_text)
-
-    return prev_html, chunks, playres_x, playres_y, srt_path, ass_path
+    return chunks, table, prev_html, px, py, srt_path, ass_path, vtt_path
 
 # ---------- UI ----------
 FONT_CHOICES = ["Default", "Arial", "Roboto", "Open Sans", "Lato", "Noto Sans", "Montserrat"]
@@ -342,8 +449,11 @@ h1, h2, h3, .prose h1, .prose h2, .prose h3 { color: #cfe2ff !important; }
 """
 
 with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
-    gr.Markdown("### <span id='header_version'>Build: v1.0.0</span>")
-    gr.Markdown("# 🎬 Five-Word Chunker + Lyrics Time-coder  \nFast ASR → clean chunks or lyrics → SRT/ASS")
+    gr.Markdown("### <span id='header_version'>Build: v1.2.0</span>")
+    gr.Markdown("# 🎬 Chunker + Lyrics + Global Shift + Editor  \nFast ASR → edit timing → SRT/ASS/VTT")
+
+    # keep a state with current chunks
+    chunks_state = gr.State([])  # List[Dict]
 
     with gr.Row():
         with gr.Column(scale=3):
@@ -361,6 +471,9 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
                         lines=10
                     )
 
+                with gr.Accordion("Timing tools", open=False):
+                    global_shift = gr.Slider(-5.0, 5.0, value=0.0, step=0.1, label="Global shift (seconds)")
+
                 run_btn = gr.Button("Run", variant="primary")
 
             preview_html_box = gr.HTML(label="Preview")
@@ -371,6 +484,7 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
             with gr.Row():
                 srt_dl = gr.DownloadButton("Download SRT")
                 ass_dl = gr.DownloadButton("Download ASS")
+                vtt_dl = gr.DownloadButton("Download VTT")
 
         with gr.Column(scale=1):
             with gr.Group(elem_classes=["settings-card"]):
@@ -386,9 +500,33 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
                 bg_box   = gr.Checkbox(value=True, label="Boxed background behind text")
                 bg_color = gr.ColorPicker(value="#111111", label="Background color")
 
+            with gr.Group():
+                gr.Markdown("### Per-line editor")
+                table = gr.Dataframe(
+                    headers=["start", "end", "text"],
+                    datatype=["number", "number", "str"],
+                    row_count=(1, "dynamic"),
+                    wrap=True,
+                    interactive=True,
+                    label="Edit times/text here, then click Apply edits"
+                )
+                with gr.Row():
+                    apply_edits_btn = gr.Button("✅ Apply edits & refresh")
+                    sort_btn = gr.Button("Sort by start")
+                with gr.Row():
+                    nudge_earlier_btn = gr.Button("◀︎ Nudge −0.10s")
+                    nudge_later_btn = gr.Button("▶︎ Nudge +0.10s")
+
+    # --- Handlers ---
+
     def _run_and_return(*args):
-        prev_html, chunks, px, py, srt_path, ass_path = run_pipeline(*args)
-        return prev_html, chunks, px, py, srt_path, ass_path
+        chunks, table_data, prev_html, px, py, srt_path, ass_path, vtt_path = run_pipeline(*args)
+        return (
+            chunks,                   # state
+            prev_html, chunks, px, py,
+            srt_path, ass_path, vtt_path,
+            table_data
+        )
 
     run_btn.click(
         _run_and_return,
@@ -396,9 +534,79 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
             audio, language, words_per_chunk,
             layout_choice, font_family, font_size,
             text_color, outline_color, outline_w,
-            bg_box, bg_color, use_lyrics, lyrics_box
+            bg_box, bg_color, use_lyrics, lyrics_box, global_shift
         ],
-        outputs=[preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl],
+        outputs=[
+            chunks_state,            # update state
+            preview_html_box, chunks_json, playres_x_box, playres_y_box,
+            srt_dl, ass_dl, vtt_dl,
+            table
+        ],
+    )
+
+    # Apply edits from table to state + rebuild preview/files
+    def _apply_edits(table_data, layout_preset, font, size, text_hex, outline_hex, outline_w, bg_box, bg_hex, current_chunks):
+        new_chunks = table_to_chunks(table_data)
+        if not new_chunks:
+            # keep current if user cleared table accidentally
+            new_chunks = current_chunks or []
+        prev_html, px, py, srt_path, ass_path, vtt_path = build_from_chunks(
+            new_chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
+        )
+        return (
+            new_chunks,  # state
+            prev_html, new_chunks, px, py,
+            srt_path, ass_path, vtt_path,
+            chunks_to_table(new_chunks)
+        )
+
+    apply_edits_btn.click(
+        _apply_edits,
+        inputs=[table, layout_choice, font_family, font_size, text_color, outline_color, outline_w, bg_box, bg_color, chunks_state],
+        outputs=[chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
+    )
+
+    # Sort by start
+    def _sort_chunks(current_chunks, layout_preset, font, size, text_hex, outline_hex, outline_w, bg_box, bg_hex):
+        new_chunks = sorted(current_chunks or [], key=lambda x: (x["start"], x["end"]))
+        prev_html, px, py, srt_path, ass_path, vtt_path = build_from_chunks(
+            new_chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
+        )
+        return (
+            new_chunks,
+            prev_html, new_chunks, px, py,
+            srt_path, ass_path, vtt_path,
+            chunks_to_table(new_chunks)
+        )
+
+    sort_btn.click(
+        _sort_chunks,
+        inputs=[chunks_state, layout_choice, font_family, font_size, text_color, outline_color, outline_w, bg_box, bg_color],
+        outputs=[chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
+    )
+
+    # Quick nudges: ±0.10s
+    def _nudge(current_chunks, delta, layout_preset, font, size, text_hex, outline_hex, outline_w, bg_box, bg_hex):
+        new_chunks = apply_global_shift(current_chunks or [], float(delta))
+        prev_html, px, py, srt_path, ass_path, vtt_path = build_from_chunks(
+            new_chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
+        )
+        return (
+            new_chunks,
+            prev_html, new_chunks, px, py,
+            srt_path, ass_path, vtt_path,
+            chunks_to_table(new_chunks)
+        )
+
+    nudge_earlier_btn.click(
+        _nudge,
+        inputs=[chunks_state, gr.State(-0.10), layout_choice, font_family, font_size, text_color, outline_color, outline_w, bg_box, bg_color],
+        outputs=[chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
+    )
+    nudge_later_btn.click(
+        _nudge,
+        inputs=[chunks_state, gr.State(+0.10), layout_choice, font_family, font_size, text_color, outline_color, outline_w, bg_box, bg_color],
+        outputs=[chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
     )
 
 if __name__ == "__main__":
