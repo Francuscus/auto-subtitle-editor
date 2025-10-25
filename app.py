@@ -16,7 +16,7 @@ LANG_MAP = {
     "auto": None, "auto-detect": None, "automatic": None,
     "spanish": "es", "es": "es",
     "hungarian": "hu", "hu": "hu",
-    # extras in case user types them
+    # extras if user types them
     "english": "en", "en": "en",
 }
 
@@ -143,7 +143,7 @@ def make_srt(segments: List[dict]) -> str:
 
 def make_ass(segments: List[dict], font_family: str, font_size: int,
              text_color: str, outline_color: str, outline_w: int) -> str:
-    # Minimal ASS with a single Default style. (We don’t convert HTML hex to ASS BGR here.)
+    # Minimal ASS with a single Default style. (Note: not converting HTML hex to ASS BGR here.)
     style = (
         "[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
@@ -263,12 +263,14 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
             segments_json = gr.JSON(label="Segments")
 
             with gr.Accordion("Export", open=True):
-                # Textboxes instead of Code, to avoid language issues; also editable.
+                # Textboxes instead of Code (wider Gradio compatibility)
                 srt_box = gr.Textbox(label="SRT", lines=10, show_copy_button=True)
                 ass_box = gr.Textbox(label="ASS", lines=10, show_copy_button=True)
                 with gr.Row():
-                    srt_dl = gr.DownloadButton("Download SRT", file_name="subtitles.srt")
-                    ass_dl = gr.DownloadButton("Download ASS", file_name="subtitles.ass")
+                    # In older Gradio, you just set the label here,
+                    # and later populate the button with a file path.
+                    srt_dl = gr.DownloadButton("Download SRT")
+                    ass_dl = gr.DownloadButton("Download ASS")
 
         with gr.Column(scale=1):
             with gr.Group():
@@ -291,16 +293,16 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
                     lines=10
                 )
 
-    # Wire up
+    # Wire up main run
     run_btn.click(
         run_pipeline,
         inputs=[audio, language, font_family, font_size, text_color, outline_color, outline_w, use_lyrics, lyrics_box],
         outputs=[preview, segments_json, srt_box, ass_box]
     )
 
-    # Downloads: return a filepath to the button
-    srt_dl.click(lambda s: download_file(s, "subtitles.srt"), inputs=[srt_box], outputs=srt_dl)
-    ass_dl.click(lambda a: download_file(a, "subtitles.ass"), inputs=[ass_box], outputs=ass_dl)
+    # Wire up downloads (return a file path; Gradio uses the basename as the download name)
+    srt_dl.click(lambda s: download_file(s, "subtitles.srt"), inputs=[srt_box], outputs=[srt_dl])
+    ass_dl.click(lambda a: download_file(a, "subtitles.ass"), inputs=[ass_box], outputs=[ass_dl])
 
 
 if __name__ == "__main__":
