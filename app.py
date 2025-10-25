@@ -1,35 +1,31 @@
-# Language Learning Subtitle Editor (HF Space)
-# Version 2.1  — stable transcription + external HTML editor workflow
-# Default text color: blue (#1E88E5)
+# Language Learning Subtitle Editor
+# Version 2.1 — External Editor Workflow (Gradio 4.x safe)
 
-from __future__ import annotations
-import os, re, json, tempfile, subprocess, shlex
-from typing import List
-from html import unescape
+import os
+import re
+import tempfile
+from typing import List, Tuple, Optional
 
 import gradio as gr
 import torch
 import whisperx
 
-
-# -------------------------- App Config --------------------------
+# -------------------------- Config --------------------------
 
 VERSION = "2.1"
-TITLE = "Language Learning Subtitle Editor"
-BANNER_COLOR = "#00BCD4"          # cyan
-DEFAULT_TEXT_COLOR = "#1E88E5"    # blue
+BANNER_COLOR = "#00BCD4"  # Cyan banner
+DEFAULT_SAMPLE_TEXT_COLOR = "#1e88e5"  # Blue so it isn't white-on-white
 
 LANG_MAP = {
     "auto": None, "auto-detect": None, "automatic": None,
-    "hungarian": "hu", "magyar": "hu", "hun": "hu",
-    "spanish": "es", "español": "es", "esp": "es",
-    "english": "en", "eng": "en",
+    "hungarian": "hu", "magyar": "hu", "hun": "hu", "hu": "hu",
+    "spanish": "es", "español": "es", "esp": "es", "es": "es",
+    "english": "en", "eng": "en", "en": "en",
 }
-
 
 # -------------------------- Utilities --------------------------
 
-def normalize_lang(s: str | None):
+def normalize_lang(s: Optional[str]) -> Optional[str]:
     if not s:
         return None
     t = s.strip().lower()
@@ -38,155 +34,241 @@ def normalize_lang(s: str | None):
     m = re.search(r"\b([a-z]{2,3})\b", t)
     return m.group(1) if m else None
 
-
-def seconds_to_srt_timestamp(t: float) -> str:
-    t = max(float(t), 0.0)
-    h = int(t // 3600); t -= h * 3600
-    m = int(t // 60);   t -= m * 60
+def seconds_to_timestamp_srt(t: float) -> str:
+    """Convert seconds to SRT timestamp (HH:MM:SS,mmm)."""
+    t = max(t, 0.0)
+    h = int(t // 3600)
+    t -= h * 3600
+    m = int(t // 60)
+    t -= m * 60
     s = int(t)
     ms = int(round((t - s) * 1000))
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-
-def seconds_to_ass_timestamp(t: float) -> str:
-    t = max(float(t), 0.0)
-    h = int(t // 3600); t -= h * 3600
-    m = int(t // 60);   t -= m * 60
+def seconds_to_timestamp_ass(t: float) -> str:
+    """Convert seconds to ASS timestamp (H:MM:SS.cc)."""
+    t = max(t, 0.0)
+    h = int(t // 3600)
+    t -= h * 3600
+    m = int(t // 60)
+    t -= m * 60
     s = int(t)
     cs = int(round((t - s) * 100))  # centiseconds
     return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
 
-
-def save_text(content: str, suffix: str) -> str:
-    d = tempfile.mkdtemp()
-    p = os.path.join(d, f"subtitles{suffix}")
-    with open(p, "w", encoding="utf-8") as f:
-        f.write(content)
-    return p
-
-
-def save_json(obj, basename: str) -> str:
-    d = tempfile.mkdtemp()
-    p = os.path.join(d, basename)
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-    return p
-
-
-def looks_like_video(path: str) -> bool:
-    ext = (os.path.splitext(path)[1] or "").lower()
-    return ext in {".mp4", ".mov", ".mkv", ".webm", ".avi"}
-
-
-# -------------------------- WhisperX (robust) --------------------------
+# -------------------------- ASR Model --------------------------
 
 _asr_model = None
 
 def get_asr_model():
-    """
-    Load WhisperX with a safe compute_type.
-    CPU -> int8 (fallback int16)
-    GPU -> float16 (fallback float32)
-    """
+    """Lazy-load WhisperX with safe compute types for CPU/GPU."""
     global _asr_model
     if _asr_model is not None:
         return _asr_model
 
     use_cuda = torch.cuda.is_available()
     device = "cuda" if use_cuda else "cpu"
-    compute = "float16" if use_cuda else "int8"
-    print(f"[v{VERSION}] WhisperX device={device}, compute_type={compute}")
+    compute = "float16" if use_cuda else "int8"  # CPU int8; safe + fast
 
+    print(f"[v{VERSION}] Loading WhisperX on {device} with compute_type={compute}")
     try:
         _asr_model = whisperx.load_model("small", device=device, compute_type=compute)
     except ValueError as e:
+        # Fallback if int8 not supported on this CPU
         if "compute type" in str(e).lower():
-            fb = "float32" if use_cuda else "int16"
-            print(f"[v{VERSION}] Falling back to compute_type={fb}")
-            _asr_model = whisperx.load_model("small", device=device, compute_type=fb)
+            fallback = "int16" if device == "cpu" else "float32"
+            print(f"[v{VERSION}] Falling back to compute_type={fallback}")
+            _asr_model = whisperx.load_model("small", device=device, compute_type=fallback)
         else:
             raise
     return _asr_model
 
+# -------------------------- Transcription --------------------------
 
-def transcribe_with_words(audio_path: str, language_code: str | None) -> List[dict]:
+def transcribe_with_words(audio_path: str, language_code: Optional[str]) -> List[dict]:
     """
-    Returns list of dicts: {start, end, text}
-    If word timing is absent, approximates words within each segment.
+    Transcribe audio and return a list of word dicts:
+    { start: float, end: float, text: str, color: str? }
     """
     model = get_asr_model()
-    print("[ASR] Transcribing…")
-    result = model.transcribe(audio_path, language=language_code)  # no word_timestamps kw
-    segments = result.get("segments", []) or []
+    print("[Transcribe] Starting transcription...")
+    # Do NOT pass unsupported args (e.g., word_timestamps). WhisperX will include words if available.
+    result = model.transcribe(audio_path, language=language_code)
+    segments = result.get("segments", [])
 
     words: List[dict] = []
     for seg in segments:
-        s0 = float(seg.get("start", 0.0))
-        s1 = float(seg.get("end", s0))
-        if seg.get("words"):
+        s_start = float(seg.get("start", 0.0))
+        s_end = float(seg.get("end", max(s_start + 0.2, s_start)))
+        if "words" in seg and seg["words"]:
             for w in seg["words"]:
-                words.append({
-                    "start": float(w.get("start", s0)),
-                    "end": float(w.get("end", s1)),
-                    "text": (w.get("word") or w.get("text") or "").strip()
-                })
+                # Some models store "word", others "text"
+                w_text = (w.get("word") or w.get("text") or "").strip()
+                if not w_text:
+                    continue
+                w_start = float(w.get("start", s_start))
+                w_end = float(w.get("end", s_end))
+                words.append({"start": w_start, "end": w_end, "text": w_text})
         else:
+            # Fallback split by spaces into equal-duration chunks
             text = (seg.get("text") or "").strip()
-            tokens = [t for t in text.split() if t]
-            if not tokens:
+            toks = [t for t in text.split() if t]
+            if not toks:
                 continue
-            dur = max(s1 - s0, 0.001)
-            step = dur / len(tokens)
-            for i, tkn in enumerate(tokens):
-                t_start = s0 + i * step
-                t_end = t_start + step
-                words.append({"start": round(t_start, 3), "end": round(t_end, 3), "text": tkn})
-    print(f"[ASR] {len(words)} words")
+            dur = max(s_end - s_start, 0.2)
+            step = dur / len(toks)
+            for i, tok in enumerate(toks):
+                w_start = s_start + i * step
+                w_end = min(s_start + (i + 1) * step, s_end)
+                words.append({"start": round(w_start, 3), "end": round(w_end, 3), "text": tok})
+    print(f"[Transcribe] Got {len(words)} words.")
     return words
 
+# -------------------------- HTML Export / Import --------------------------
 
-# -------------------------- HTML import (colors + text) --------------------------
+HTML_TEMPLATE_HEAD = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<title>Edit Your Subtitles</title>
+<style>
+  body {{ font-family: Arial, sans-serif; padding: 32px; max-width: 900px; margin: 0 auto; }}
+  h1 {{ color: {BANNER_COLOR}; margin-bottom: 0.25rem; }}
+  .note {{ color: #555; margin-bottom: 1rem; }}
+  .panel {{ background: #f7f7f9; border: 1px solid #e2e2e6; border-radius: 10px; padding: 16px; margin: 16px 0; }}
+  .text-area {{ border: 2px solid {BANNER_COLOR}; border-radius: 10px; padding: 16px; line-height: 2; font-size: 18px; }}
+  .word {{ display: inline-block; padding: 2px 4px; margin: 2px 2px; cursor: text; color: {DEFAULT_SAMPLE_TEXT_COLOR}; }}
+  .time {{ color: #999; font-size: 12px; margin-right: 6px; }}
+</style>
+</head>
+<body>
+<h1>Edit Your Subtitles</h1>
+<p class="note">Tip: Edit text freely. Use your editor’s <b>Text Color</b> or <b>Highlighter</b> on any words. Save as <code>.html</code> and upload back.</p>
+<div class="panel">
+  <b>Recommended Color Guide (optional):</b>
+  <ul>
+    <li><span style="background:#FFFF00">Yellow</span> verbs</li>
+    <li><span style="color:#FF0000">Red</span> important</li>
+    <li><span style="color:#00FFFF">Cyan</span> nouns</li>
+    <li><span style="color:#00FF00">Green</span> adjectives</li>
+    <li><span style="color:#AA96DA">Purple</span> endings/conjugations</li>
+  </ul>
+</div>
+<div class="text-area" contenteditable="true">
+"""
+
+HTML_TEMPLATE_TAIL = """
+</div>
+<p class="note">When done, save this page as <b>HTML</b> and upload it back to the app.</p>
+</body>
+</html>
+"""
+
+def export_to_html_for_editing(word_segments: List[dict]) -> str:
+    """Create an editable HTML with words wrapped in spans."""
+    html = [HTML_TEMPLATE_HEAD]
+    for w in word_segments:
+        # Timestamps included as data attributes (optional for future)
+        html.append(
+            f'<span class="word" data-start="{w["start"]:.3f}" data-end="{w["end"]:.3f}">{w["text"]}</span> '
+        )
+    html.append(HTML_TEMPLATE_TAIL)
+
+    tmpdir = tempfile.mkdtemp()
+    path = os.path.join(tmpdir, "subtitles_for_editing.html")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("".join(html))
+    return path
+
+def _css_color_to_hex(style: str) -> Optional[str]:
+    """
+    Extract #RRGGBB or rgb(...) from inline style and normalize to #RRGGBB.
+    Returns None if no color found.
+    """
+    if not style:
+        return None
+    # First prefer explicit color property if present
+    # Try hex
+    m = re.search(r"#([0-9A-Fa-f]{6})", style)
+    if m:
+        return "#" + m.group(1).upper()
+    # Try rgb(...)
+    m = re.search(r"rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", style)
+    if m:
+        r, g, b = map(int, m.groups())
+        return f"#{r:02X}{g:02X}{b:02X}"
+    # Try named colors minimally (common ones)
+    named = {
+        "red": "#FF0000", "yellow": "#FFFF00", "cyan": "#00FFFF", "aqua": "#00FFFF",
+        "green": "#00FF00", "blue": "#0000FF", "magenta": "#FF00FF", "fuchsia": "#FF00FF",
+        "black": "#000000", "white": "#FFFFFF", "purple": "#800080",
+    }
+    m = re.search(r"color\s*:\s*([a-zA-Z]+)", style)
+    if m and m.group(1).lower() in named:
+        return named[m.group(1).lower()]
+    # Also check background
+    m = re.search(r"background(?:-color)?\s*:\s*#([0-9A-Fa-f]{6})", style)
+    if m:
+        return "#" + m.group(1).upper()
+    m = re.search(r"background(?:-color)?\s*:\s*rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", style)
+    if m:
+        r, g, b = map(int, m.groups())
+        return f"#{r:02X}{g:02X}{b:02X}"
+    return None
 
 def import_from_html(html_path: str, original_words: List[dict]) -> List[dict]:
     """
-    Reads an edited HTML file (from editor.html or any WYSIWYG) and extracts
-    words with their colors. Aligns by index to original timing.
+    Parse edited HTML, extract words + colors, align back onto original timestamps order.
+    We read visible text in the editable area left-to-right; colors from inline styles if present.
     """
     from html.parser import HTMLParser
 
     class Parser(HTMLParser):
         def __init__(self):
             super().__init__()
-            self.words: List[dict] = []
             self.in_text_area = False
-            self.cur_color = DEFAULT_TEXT_COLOR
+            self.stack_styles: List[str] = []
+            self.words: List[Tuple[str, Optional[str]]] = []  # (text, hex_color)
 
         def handle_starttag(self, tag, attrs):
             attrs = dict(attrs)
-            if tag == "div" and ("class" in attrs and "text-area" in attrs["class"]):
+            if tag == "div" and attrs.get("class", "") == "text-area":
                 self.in_text_area = True
-            if tag == "span" and self.in_text_area:
+            if self.in_text_area and tag in ("span", "font", "mark"):
                 style = attrs.get("style", "")
-                # Prefer explicit color; fall back to highlight as color if only that exists
-                hex_match = re.search(r'#([0-9A-Fa-f]{6})', style)
-                if hex_match:
-                    self.cur_color = "#" + hex_match.group(1)
-                elif "rgb" in style:
-                    m = re.search(r'rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', style)
-                    if m:
-                        r, g, b = map(int, m.groups())
-                        self.cur_color = f"#{r:02X}{g:02X}{b:02X}"
+                color = _css_color_to_hex(style)
+                # Some editors put color in <font color="">
+                if not color and "color" in attrs:
+                    color = _css_color_to_hex(f"color:{attrs['color']}")
+                # Some highlights are "background: ..."
+                if not color and "background" in attrs:
+                    color = _css_color_to_hex(f"background:{attrs['background']}")
+                self.stack_styles.append(color or "")
 
         def handle_endtag(self, tag):
             if tag == "div" and self.in_text_area:
                 self.in_text_area = False
+            if self.in_text_area and tag in ("span", "font", "mark"):
+                if self.stack_styles:
+                    self.stack_styles.pop()
 
         def handle_data(self, data):
-            if not self.in_text_area: return
-            for raw in data.split():
-                w = raw.strip()
-                if w:
-                    self.words.append({"text": w, "color": self.cur_color})
+            if not self.in_text_area:
+                return
+            # split on whitespace, keep only non-empty tokens
+            for tok in re.split(r"\s+", data):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                # pick last non-empty color in the stack
+                color = None
+                for c in reversed(self.stack_styles):
+                    if c:
+                        color = c
+                        break
+                if not color:
+                    color = DEFAULT_SAMPLE_TEXT_COLOR  # default blue
+                self.words.append((tok, color))
 
     with open(html_path, "r", encoding="utf-8") as f:
         html = f.read()
@@ -194,53 +276,44 @@ def import_from_html(html_path: str, original_words: List[dict]) -> List[dict]:
     p = Parser()
     p.feed(html)
 
-    # map color+text onto original timings by index
-    out: List[dict] = []
+    edited = []
     for i, ow in enumerate(original_words):
         if i < len(p.words):
-            out.append({
-                "start": ow["start"],
-                "end": ow["end"],
-                "text": p.words[i]["text"],
-                "color": p.words[i]["color"] or DEFAULT_TEXT_COLOR
-            })
+            txt, col = p.words[i]
+            edited.append({"start": ow["start"], "end": ow["end"], "text": txt, "color": col})
         else:
-            out.append({
-                "start": ow["start"], "end": ow["end"],
-                "text": ow["text"], "color": DEFAULT_TEXT_COLOR
-            })
-    return out
+            edited.append({"start": ow["start"], "end": ow["end"], "text": ow["text"], "color": DEFAULT_SAMPLE_TEXT_COLOR})
+    return edited
 
-
-# -------------------------- SubRip / ASS exporters --------------------------
+# -------------------------- SubRip (SRT) / ASS --------------------------
 
 def export_to_srt(words: List[dict], words_per_line: int = 5) -> str:
-    lines = []
-    i, n = 0, 1
+    """Plain SRT (no color)."""
+    i = 0
+    n = 1
+    out = []
     while i < len(words):
-        chunk = words[i:i+words_per_line]
-        if not chunk: break
-        start = seconds_to_srt_timestamp(chunk[0]["start"])
-        end   = seconds_to_srt_timestamp(chunk[-1]["end"])
-        text  = " ".join(w["text"] for w in chunk)
-        lines.append(f"{n}\n{start} --> {end}\n{text}\n")
-        i += words_per_line; n += 1
-    return "\n".join(lines)
-
+        chunk = words[i:i + words_per_line]
+        start = seconds_to_timestamp_srt(chunk[0]["start"])
+        end = seconds_to_timestamp_srt(chunk[-1]["end"])
+        text = " ".join(w["text"] for w in chunk)
+        out.append(f"{n}\n{start} --> {end}\n{text}\n")
+        i += words_per_line
+        n += 1
+    return "\n".join(out)
 
 def _hex_to_ass_bgr(hex_color: str) -> str:
-    # ASS color is &H AABBGGRR; we use full opacity (00 alpha)
-    hx = (hex_color or DEFAULT_TEXT_COLOR).lstrip("#")
-    if len(hx) != 6:
-        hx = DEFAULT_TEXT_COLOR.lstrip("#")
-    r = int(hx[0:2], 16); g = int(hx[2:4], 16); b = int(hx[4:6], 16)
+    """#RRGGBB -> &H00BBGGRR for ASS."""
+    if not hex_color or not hex_color.startswith("#") or len(hex_color) != 7:
+        hex_color = "#FFFFFF"
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
     return f"&H00{b:02X}{g:02X}{r:02X}"
 
-
-def export_to_ass(words: List[dict], words_per_line: int = 5,
-                  font: str = "Arial", size: int = 36) -> str:
+def export_to_ass(words: List[dict], words_per_line: int = 5, font="Arial", size=36) -> str:
+    """ASS with per-word colors."""
     header = f"""[Script Info]
-; {TITLE} v{VERSION}
 ScriptType: v4.00+
 PlayResX: 1280
 PlayResY: 720
@@ -248,202 +321,180 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,30,30,36,1
+Style: Default,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,30,30,30,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    out_lines = [header]
     i = 0
+    lines = [header]
     while i < len(words):
-        chunk = words[i:i+words_per_line]
-        if not chunk: break
-        t0 = seconds_to_ass_timestamp(chunk[0]["start"])
-        t1 = seconds_to_ass_timestamp(chunk[-1]["end"])
-
+        chunk = words[i:i + words_per_line]
+        start = seconds_to_timestamp_ass(chunk[0]["start"])
+        end = seconds_to_timestamp_ass(chunk[-1]["end"])
         parts = []
         for w in chunk:
-            c = _hex_to_ass_bgr(w.get("color") or DEFAULT_TEXT_COLOR)
-            txt = (w.get("text") or "").replace("{", "").replace("}", "")
-            parts.append(f"{{\\c{c}}}{txt}")
-
-        out_lines.append(f"Dialogue: 0,{t0},{t1},Default,,0,0,0,,{' '.join(parts)}")
+            col = _hex_to_ass_bgr(w.get("color", DEFAULT_SAMPLE_TEXT_COLOR))
+            parts.append(f"{{\\c{col}}}{w['text']}")
+        text = " ".join(parts)
+        lines.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
         i += words_per_line
-    return "\n".join(out_lines) + "\n"
+    return "\n".join(lines) + "\n"
 
+def _save_temp(content: str, ext: str) -> str:
+    tmp = tempfile.mkdtemp()
+    path = os.path.join(tmp, f"subtitles{ext}")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return path
 
-# -------------------------- Optional: burn-in render (ffmpeg) --------------------------
-
-def burn_in_ass(video_path: str, ass_path: str) -> str:
-    """
-    Burns ASS into a video using ffmpeg. Requires a *video* input.
-    Returns path to MP4.
-    """
-    out_dir = tempfile.mkdtemp()
-    out_path = os.path.join(out_dir, "subtitled.mp4")
-    cmd = f'ffmpeg -y -i {shlex.quote(video_path)} -vf subtitles={shlex.quote(ass_path)} -c:a copy -c:v libx264 -pix_fmt yuv420p {shlex.quote(out_path)}'
-    print("[ffmpeg]", cmd)
-    subprocess.run(cmd, shell=True, check=True)
-    return out_path
-
-
-# -------------------------- Gradio UI --------------------------
+# -------------------------- Gradio App --------------------------
 
 def create_app():
-    with gr.Blocks(theme=gr.themes.Soft(), title=TITLE) as app:
+    with gr.Blocks(theme=gr.themes.Soft(), title=f"Language Subtitle Editor v{VERSION}") as demo:
 
-        gr.HTML(f"""
-        <div style="background:{BANNER_COLOR};color:white;padding:16px;border-radius:10px;margin-bottom:10px;text-align:center">
-          <h2 style="margin:2px 0">{TITLE}</h2>
-          <div>Version {VERSION} — edit in a rich HTML page, then import and export SRT/ASS</div>
-        </div>
-        """)
-
-        # State
-        word_segments_state = gr.State([])   # raw words from ASR
-        edited_words_state  = gr.State([])   # words after importing edited HTML
-
-        with gr.Row():
-            with gr.Column(scale=2):
-                gr.Markdown("### Step 1 — Transcribe")
-                audio_in = gr.Audio(label="Upload Audio/Video", type="filepath")
-                language = gr.Dropdown(
-                    choices=[("Auto-detect","auto"), ("Spanish","es"), ("Hungarian","hu"), ("English","en")],
-                    value="auto", label="Language"
-                )
-                btn_transcribe = gr.Button("Transcribe", variant="primary")
-                status = gr.Textbox(label="Status", value="Ready.", lines=3, interactive=False)
-                preview = gr.Textbox(label="Transcript preview", lines=6, interactive=False)
-
-            with gr.Column(scale=1):
-                gr.Markdown("### Step 2 — Edit in the built-in HTML page")
-                btn_words_json = gr.Button("Download words.json")
-                file_words_json = gr.File(label="words.json")
-                gr.HTML(
-                    '<a href="file=editor.html" target="_blank" '
-                    'style="display:inline-block;margin-top:8px;background:#00BCD4;color:#fff;'
-                    'padding:10px 14px;border-radius:10px;text-decoration:none">Open built-in editor ↗</a>'
-                )
-                gr.Markdown(
-                    "- In the editor: **Load words.json**, style text (font, size, bold/italic/underline, text color, highlight), then **Export HTML**.\n"
-                    "- Default text color starts as **blue**."
-                )
-
-        with gr.Row():
-            with gr.Column(scale=2):
-                gr.Markdown("### Step 3 — Import your edited HTML")
-                file_html = gr.File(label="Upload edited HTML", file_types=[".html", ".htm"])
-                btn_import = gr.Button("Import", variant="primary")
-                import_status = gr.Textbox(label="Import status", lines=2, interactive=False)
-
-        with gr.Row():
-            with gr.Column(scale=2):
-                gr.Markdown("### Step 4 — Export subtitles")
-                words_per = gr.Slider( min=2, max=10, value=5, step=1, label="Words per subtitle line" )
-                font = gr.Dropdown( choices=["Arial","Times New Roman","Georgia","Verdana","Courier New"], value="Arial", label="Font" )
-                size = gr.Slider( min=20, max=72, value=36, step=2, label="Font size")
-                with gr.Row():
-                    btn_srt = gr.Button("Export SRT")
-                    btn_ass = gr.Button("Export ASS (keeps colors)", variant="primary")
-                file_srt = gr.File(label="SRT file")
-                file_ass = gr.File(label="ASS file")
-
-        with gr.Row():
-            with gr.Column(scale=2):
-                gr.Markdown("### Optional — Burn subtitles into a video (FFmpeg)")
-                gr.Markdown("> Works only if your uploaded file is a **video** (e.g., .mp4).")
-                btn_render = gr.Button("Render MP4 with subtitles")
-                file_mp4 = gr.File(label="Subtitled video (MP4)")
-
-        # ---------------- Events ----------------
-
-        def do_transcribe(path, lang):
-            if not path:
-                return "❌ Please upload audio or video.", [], ""
-            try:
-                yield "Loading model…", [], ""
-                code = normalize_lang(lang)
-                yield "Transcribing…", [], ""
-                words = transcribe_with_words(path, code)
-                prev = " ".join(w["text"] for w in words[:80])
-                if len(words) > 80: prev += " …"
-                msg = f"✅ Done. {len(words)} words."
-                return msg, words, prev
-            except Exception as e:
-                return f"❌ Error: {e}", [], ""
-
-        btn_transcribe.click(
-            fn=do_transcribe,
-            inputs=[audio_in, language],
-            outputs=[status, word_segments_state, preview]
+        gr.HTML(
+            f"""
+            <div style="background:{BANNER_COLOR};color:white;padding:18px;border-radius:12px;margin-bottom:16px;text-align:center">
+              <div style="font-size:22px;font-weight:700;">Language Learning Subtitle Editor</div>
+              <div style="opacity:0.9;">Version {VERSION} — Edit in Word/Google Docs/Your Browser</div>
+            </div>
+            """
         )
 
-        def do_download_words_json(words):
+        # States
+        word_segments_state = gr.State([])     # original words (timestamps)
+        edited_words_state = gr.State([])      # edited (with colors)
+        status_box = gr.Textbox(label="Status", value="Ready.", interactive=False, lines=3)
+
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 1) Transcribe Audio")
+                audio_input = gr.Audio(label="Upload Audio/Video", type="filepath")
+                language_dropdown = gr.Dropdown(
+                    choices=[("Auto-detect", "auto"), ("Spanish", "es"), ("Hungarian", "hu"), ("English", "en")],
+                    value="auto",
+                    label="Language"
+                )
+                transcribe_btn = gr.Button("Transcribe", variant="primary", size="lg")
+                transcript_preview = gr.Textbox(label="Transcript Preview", lines=8, interactive=False)
+
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 2) Download Editable HTML")
+                download_html_btn = gr.Button("Create & Download HTML", size="lg")
+                html_file = gr.File(label="Download the generated HTML, edit it, then upload it below")
+
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 3) Upload Edited HTML")
+                upload_html = gr.File(label="Upload your edited HTML", file_types=[".html", ".htm"])
+                import_btn = gr.Button("Import Edited HTML", variant="primary", size="lg")
+                import_status = gr.Textbox(label="Import Status", interactive=False, lines=3)
+
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 4) Export Subtitles")
+                with gr.Row():
+                    words_per = gr.Slider(minimum=2, maximum=10, value=5, step=1, label="Words per subtitle line")
+                    font_family = gr.Dropdown(
+                        choices=["Arial", "Times New Roman", "Courier New", "Georgia", "Verdana"],
+                        value="Arial", label="Font"
+                    )
+                    font_size = gr.Slider(minimum=20, maximum=72, value=36, step=2, label="Size")
+                with gr.Row():
+                    export_srt_btn = gr.Button("Export SRT (no colors)")
+                    export_ass_btn = gr.Button("Export ASS (with colors)", variant="primary")
+                srt_file = gr.File(label="SRT File")
+                ass_file = gr.File(label="ASS File")
+
+        # ---------- Handlers ----------
+
+        def do_transcribe(audio_path, lang_sel):
+            if not audio_path:
+                return "❌ Error: no audio file provided.", [], ""
+            try:
+                lang_code = normalize_lang(lang_sel)
+                msg = f"Loading model…\nLanguage: {lang_sel}"
+                # step 1 message
+                yield msg, [], ""
+                words = transcribe_with_words(audio_path, lang_code)
+                preview = " ".join(w["text"] for w in words[:120])
+                if len(words) > 120:
+                    preview += " …"
+                yield f"✅ Transcribed {len(words)} words.", words, preview
+            except Exception as e:
+                yield f"❌ Error during transcription: {e}", [], ""
+
+        transcribe_btn.click(
+            fn=do_transcribe,
+            inputs=[audio_input, language_dropdown],
+            outputs=[status_box, word_segments_state, transcript_preview]
+        )
+
+        def handle_download_html(words):
             if not words:
                 gr.Warning("Transcribe first.")
                 return None
-            return save_json(words, "words.json")
+            try:
+                path = export_to_html_for_editing(words)
+                return path
+            except Exception as e:
+                gr.Warning(f"Error creating HTML: {e}")
+                return None
 
-        btn_words_json.click(
-            fn=do_download_words_json,
+        download_html_btn.click(
+            fn=handle_download_html,
             inputs=[word_segments_state],
-            outputs=[file_words_json]
+            outputs=[html_file]
         )
 
-        def do_import_html(f, orig):
-            if not f: return [], "❌ No file uploaded."
-            if not orig: return [], "❌ Transcribe first."
+        def handle_import_html(file, original_words):
+            if not file:
+                return "❌ No file uploaded.", []
+            if not original_words:
+                return "❌ Transcribe first.", []
             try:
-                edited = import_from_html(f.name, orig)
-                return edited, f"✅ Imported {len(edited)} words with colors."
+                edited = import_from_html(file.name, original_words)
+                return f"✅ Imported {len(edited)} words with colors.", edited
             except Exception as e:
-                return [], f"❌ Error: {e}"
+                return f"❌ Error importing HTML: {e}", []
 
-        btn_import.click(
-            fn=do_import_html,
-            inputs=[file_html, word_segments_state],
-            outputs=[edited_words_state, import_status]
+        import_btn.click(
+            fn=handle_import_html,
+            inputs=[upload_html, word_segments_state],
+            outputs=[import_status, edited_words_state]
         )
 
-        def do_export_srt(edited, n):
-            if not edited:
-                gr.Warning("Import an edited HTML first.")
+        def handle_export_srt(edited_words, n_words):
+            if not edited_words:
+                gr.Warning("Import your edited HTML first.")
                 return None
-            return save_text(export_to_srt(edited, int(n)), ".srt")
+            srt = export_to_srt(edited_words, int(n_words))
+            return _save_temp(srt, ".srt")
 
-        def do_export_ass(edited, n, fnt, sz):
-            if not edited:
-                gr.Warning("Import an edited HTML first.")
-                return None
-            return save_text(export_to_ass(edited, int(n), fnt, int(sz)), ".ass")
-
-        btn_srt.click(do_export_srt, [edited_words_state, words_per], [file_srt])
-        btn_ass.click(do_export_ass, [edited_words_state, words_per, font, size], [file_ass])
-
-        def do_render(video_path, edited, n, fnt, sz):
-            if not video_path or not looks_like_video(video_path):
-                gr.Warning("Please upload a *video* (e.g. MP4) in Step 1.")
-                return None
-            if not edited:
-                gr.Warning("Import an edited HTML first.")
-                return None
-            # make a temp ASS, burn it in
-            ass_path = save_text(export_to_ass(edited, int(n), fnt, int(sz)), ".ass")
-            try:
-                out = burn_in_ass(video_path, ass_path)
-                return out
-            except Exception as e:
-                gr.Warning(f"FFmpeg error: {e}")
-                return None
-
-        btn_render.click(
-            fn=do_render,
-            inputs=[audio_in, edited_words_state, words_per, font, size],
-            outputs=[file_mp4]
+        export_srt_btn.click(
+            fn=handle_export_srt,
+            inputs=[edited_words_state, words_per],
+            outputs=[srt_file]
         )
 
-    return app
+        def handle_export_ass(edited_words, n_words, font, size):
+            if not edited_words:
+                gr.Warning("Import your edited HTML first.")
+                return None
+            ass = export_to_ass(edited_words, int(n_words), font, int(size))
+            return _save_temp(ass, ".ass")
 
+        export_ass_btn.click(
+            fn=handle_export_ass,
+            inputs=[edited_words_state, words_per, font_family, font_size],
+            outputs=[ass_file]
+        )
+
+        return demo
+
+# -------------------------- Main --------------------------
 
 if __name__ == "__main__":
     demo = create_app()
