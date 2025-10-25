@@ -16,8 +16,8 @@ import whisperx
 
 # -------------------------- Config --------------------------
 
-VERSION = "1.1c"
-BANNER_COLOR = "#1976D2"  # Blue for v1.1c
+VERSION = "1.2"
+BANNER_COLOR = "#F57C00"  # Orange for v1.2
 
 LANG_MAP = {
     "auto": None, "auto-detect": None, "automatic": None,
@@ -380,14 +380,36 @@ def create_app():
                     value="<p style='text-align: center; color: #888;'>Upload audio and click Transcribe to begin</p>"
                 )
                 
-                subtitle_json = gr.JSON(
-                    label="Subtitle Data (edit colors here, then click Update Preview)",
-                    visible=False  # Start hidden for speed
+                gr.Markdown("""
+                **Color Editing (Simple Text Format):**
+                After transcription, you can edit word colors below. Format:
+                `line_number | word_index | color_hex`
+                
+                Example:
+                ```
+                1 | 0 | #FF0000    (Line 1, first word = red)
+                1 | 1 | #0000FF    (Line 1, second word = blue)
+                2 | 0 | #00FF00    (Line 2, first word = green)
+                ```
+                """)
+                
+                color_editor = gr.Textbox(
+                    label="Color Edits (one per line)",
+                    placeholder="1 | 0 | #FF0000\n2 | 1 | #0000FF",
+                    lines=10,
+                    interactive=True
                 )
                 
-                show_json_btn = gr.Button("Show/Edit JSON Data (for color editing)")
+                apply_colors_btn = gr.Button("Apply Color Changes")
                 
-                update_preview_btn = gr.Button("Update Preview from JSON")
+                subtitle_json = gr.JSON(
+                    label="Full Subtitle Data (for advanced users - SLOW to load)",
+                    visible=False
+                )
+                
+                show_json_btn = gr.Button("Show Full JSON (Warning: May be slow)")
+                
+                update_preview_btn = gr.Button("Refresh Preview")
         
         with gr.Row():
             with gr.Column():
@@ -464,6 +486,46 @@ def create_app():
             editor = create_simple_editor(subtitles)
             return editor
         
+        def apply_color_edits(color_text, subtitles):
+            """Apply color edits from simple text format"""
+            if not subtitles or not color_text:
+                return subtitles, create_simple_editor(subtitles) if subtitles else "<p>No data</p>"
+            
+            # Parse the text edits
+            lines = color_text.strip().split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
+                try:
+                    # Parse format: "1 | 0 | #FF0000"
+                    parts = [p.strip() for p in line.split('|')]
+                    if len(parts) != 3:
+                        continue
+                    
+                    line_num = int(parts[0]) - 1  # Convert to 0-based
+                    word_idx = int(parts[1])
+                    color = parts[2]
+                    
+                    # Validate
+                    if line_num < 0 or line_num >= len(subtitles):
+                        continue
+                    if word_idx < 0 or word_idx >= len(subtitles[line_num].get('colors', [])):
+                        continue
+                    if not color.startswith('#'):
+                        continue
+                    
+                    # Apply the color
+                    subtitles[line_num]['colors'][word_idx] = color
+                    
+                except (ValueError, IndexError):
+                    continue
+            
+            # Update preview
+            editor = create_simple_editor(subtitles)
+            return subtitles, editor
+        
         def do_export_srt(subtitles):
             if not subtitles:
                 gr.Warning("No subtitles. Transcribe first.")
@@ -487,8 +549,14 @@ def create_app():
         
         update_preview_btn.click(
             fn=update_preview,
-            inputs=[subtitle_json],
+            inputs=[subtitles_state],
             outputs=[editor_html]
+        )
+        
+        apply_colors_btn.click(
+            fn=apply_color_edits,
+            inputs=[color_editor, subtitles_state],
+            outputs=[subtitles_state, editor_html]
         )
         
         export_srt_btn.click(
