@@ -1,2 +1,4 @@
 ffmpeg
-libgl1
+libass9
+fonts-dejavu-core
+pkg-config
