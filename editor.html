@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Subtitle Editor</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body { font-family: system-ui, Arial, sans-serif; margin: 20px; }
+  header { background:#00BCD4; color:#fff; padding:12px 16px; border-radius:10px; }
+  .panel { margin: 16px 0; padding: 12px; border: 1px solid #e3e3e3; border-radius: 10px; }
+  .toolbar button, .toolbar select, .toolbar input[type="color"], .toolbar input[type="number"] {
+    margin: 4px 6px 4px 0; padding: 6px 10px; border-radius: 8px; border: 1px solid #ccc; background:#fff;
+  }
+  .toolbar label { margin-right: 8px; }
+  #editor { min-height: 260px; border:1px solid #cfd8dc; border-radius:10px; padding:14px; line-height:1.6; }
+  .word { display:inline-block; margin: 2px 2px; }
+  .hint { color:#555; font-size: 0.95rem; }
+  .actions a, .actions button {
+    display:inline-block; margin:8px 8px 0 0; padding:10px 14px; border-radius:10px; text-decoration:none;
+  }
+  .primary { background:#00BCD4; color:#fff; border: none; }
+  .secondary { background:#eceff1; color:#000; border:1px solid #cfd8dc; }
+</style>
+</head>
+<body>
+  <header>
+    <h2 style="margin:6px 0">Built-in Subtitle Editor</h2>
+    <div>Load <code>words.json</code>, style your words (font, size, bold/italic/underline, colors), then export an HTML file to import back into the app.</div>
+  </header>
+
+  <div class="panel">
+    <strong>1) Load words.json</strong><br/>
+    <input id="jsonFile" type="file" accept=".json" />
+    <div class="hint">This is the file you download from the app (“Download words.json”).</div>
+  </div>
+
+  <div class="panel toolbar">
+    <strong>2) Style text</strong><br/>
+    <label>Font:
+      <select id="fontSel">
+        <option>Arial</option>
+        <option>Times New Roman</option>
+        <option>Georgia</option>
+        <option>Verdana</option>
+        <option>Courier New</option>
+      </select>
+    </label>
+    <label>Size:
+      <input id="fontSize" type="number" value="36" min="12" max="96" />
+    </label>
+    <button onclick="cmd('bold')"><b>B</b></button>
+    <button onclick="cmd('italic')"><i>I</i></button>
+    <button onclick="cmd('underline')"><u>U</u></button>
+    <label>Text:
+      <input id="fore" type="color" value="#1E88E5"/>
+    </label>
+    <label>Highlight:
+      <input id="back" type="color" value="#FFFF00"/>
+    </label>
+    <button onclick="setFore()">Set Text Color</button>
+    <button onclick="setBack()">Set Highlight</button>
+  </div>
+
+  <div class="panel">
+    <strong>3) Edit</strong>
+    <div id="editor" class="text-area" contenteditable="true"></div>
+    <div class="hint">Tip: you can type to fix words, delete or add words. Colors are preserved inline on each word.</div>
+  </div>
+
+  <div class="panel actions">
+    <strong>4) Export</strong><br/>
+    <button class="primary" onclick="exportHTML()">Export edited HTML</button>
+    <a id="dlLink" class="secondary" download="edited_subtitles.html" style="display:none">Download edited_subtitles.html</a>
+  </div>
+
+<script>
+const DEFAULT_COLOR = "#1E88E5";
+let words = [];
+
+document.getElementById('jsonFile').addEventListener('change', async (e)=>{
+  const file = e.target.files?.[0]; if(!file) return;
+  const text = await file.text();
+  words = JSON.parse(text);
+  renderWords(words);
+});
+
+function renderWords(wlist){
+  const ed = document.getElementById('editor');
+  ed.innerHTML = '';
+  // Build spans with default blue text color
+  wlist.forEach(w=>{
+    const span = document.createElement('span');
+    span.className = 'word';
+    span.style.color = DEFAULT_COLOR;
+    span.textContent = (w.text || '').trim();
+    ed.appendChild(span);
+    ed.appendChild(document.createTextNode(' '));
+  });
+  applyFont();
+}
+
+function cmd(name){ document.execCommand(name, false, null); }
+function setFore(){
+  const c = document.getElementById('fore').value || DEFAULT_COLOR;
+  document.execCommand('foreColor', false, c);
+}
+function setBack(){
+  const c = document.getElementById('back').value || '#FFFF00';
+  // use backgroundColor via hiliteColor if supported
+  const ok = document.execCommand('hiliteColor', false, c);
+  if(!ok){
+    // fallback: wrap selection with span style
+    wrapSelectionWithStyle('background-color:'+c);
+  }
+}
+
+function wrapSelectionWithStyle(styleStr){
+  const sel = window.getSelection();
+  if(!sel || sel.rangeCount===0) return;
+  const range = sel.getRangeAt(0).cloneRange();
+  const span = document.createElement('span');
+  span.setAttribute('style', styleStr);
+  span.appendChild(range.extractContents());
+  range.insertNode(span);
+}
+
+document.getElementById('fontSel').addEventListener('change', applyFont);
+document.getElementById('fontSize').addEventListener('input', applyFont);
+
+function applyFont(){
+  const fam = document.getElementById('fontSel').value || 'Arial';
+  const sz  = document.getElementById('fontSize').value || '36';
+  const ed  = document.getElementById('editor');
+  ed.style.fontFamily = fam + ', sans-serif';
+  ed.style.fontSize = sz + 'px';
+}
+
+function exportHTML(){
+  const ed = document.getElementById('editor');
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Edited Subtitles</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 40px; max-width: 900px; margin: 0 auto; }
+    .text-area { font-size: ${document.getElementById('fontSize').value || 36}px; line-height: 1.6; }
+    .word { display: inline-block; padding: 2px 2px; margin: 2px 1px; }
+  </style>
+</head>
+<body>
+  <div class="text-area" contenteditable="false">
+    ${ed.innerHTML}
+  </div>
+</body>
+</html>`.trim();
+
+  const blob = new Blob([html], {type:'text/html'});
+  const url = URL.createObjectURL(blob);
+  const a = document.getElementById('dlLink');
+  a.href = url;
+  a.style.display = 'inline-block';
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(url), 2000);
+}
+</script>
+</body>
+</html>
