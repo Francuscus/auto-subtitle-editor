@@ -320,6 +320,8 @@ def create_app():
         
         # State
         subtitles_state = gr.State([])
+        font_family_state = gr.State("Arial")
+        font_size_state = gr.State(36)
         
         with gr.Row():
             with gr.Column(scale=1):
@@ -346,13 +348,28 @@ def create_app():
                     label="Words per subtitle line"
                 )
                 
+                font_family = gr.Dropdown(
+                    choices=["Arial", "Times New Roman", "Courier New", "Georgia", "Verdana", "Comic Sans MS"],
+                    value="Arial",
+                    label="Font Family"
+                )
+                
+                font_size = gr.Slider(
+                    minimum=20,
+                    maximum=72,
+                    value=36,
+                    step=2,
+                    label="Font Size"
+                )
+                
                 transcribe_btn = gr.Button("Transcribe", variant="primary", size="lg")
                 
                 status_text = gr.Textbox(
                     label="Status",
                     value="Ready...",
                     interactive=False,
-                    lines=2
+                    lines=3,
+                    max_lines=5
                 )
         
         with gr.Row():
@@ -385,32 +402,56 @@ def create_app():
         
         # Events
         
-        def do_transcribe(audio_path, language, words_per):
+        def do_transcribe(audio_path, language, words_per, font_fam, font_sz):
             if not audio_path:
-                return "Error: No audio file uploaded", [], "<p>No audio</p>"
+                return "Error: No audio file uploaded", [], "<p>No audio</p>", font_fam, font_sz
             
             try:
-                yield "Loading AI model...", [], "<p>Loading...</p>"
+                yield "Loading AI model...", [], "<p>Loading...</p>", font_fam, font_sz
+                print("[DEBUG] Loading model...")
                 
                 lang_code = normalize_lang(language)
                 
-                yield "Transcribing audio...", [], "<p>Transcribing...</p>"
+                yield "Transcribing audio...", [], "<p>Transcribing...</p>", font_fam, font_sz
+                print("[DEBUG] Starting transcription...")
                 
                 word_segments, duration = transcribe_with_words(audio_path, lang_code)
+                print(f"[DEBUG] Got {len(word_segments)} words")
                 
-                yield "Grouping words into subtitles...", [], "<p>Grouping...</p>"
+                yield f"Got {len(word_segments)} words! Now grouping...", [], "<p>Grouping...</p>", font_fam, font_sz
+                print("[DEBUG] Starting grouping...")
                 
                 subtitles = group_words_into_subtitles(word_segments, int(words_per))
+                print(f"[DEBUG] Grouping done, got {len(subtitles)} subtitles")
+                
+                # Show progress for each subtitle line created
+                yield f"Created {len(subtitles)} subtitle lines! Building preview...", [], f"<p>Building preview with {len(subtitles)} lines...</p>", font_fam, font_sz
+                print("[DEBUG] Creating HTML preview...")
+                
+                # Show the subtitles as we build the preview
+                preview_lines = []
+                for i, sub in enumerate(subtitles[:10]):  # Show first 10 as preview
+                    preview_lines.append(f"{i+1}. [{sub['start']:.1f}s] {sub['text']}")
+                
+                preview_text = "<br>".join(preview_lines)
+                if len(subtitles) > 10:
+                    preview_text += f"<br>... and {len(subtitles) - 10} more lines"
+                
+                yield f"Preview ready! Total: {len(subtitles)} lines", [], f"<div style='background:#f0f0f0; padding:10px;'>{preview_text}</div>", font_fam, font_sz
                 
                 editor = create_simple_editor(subtitles)
+                print("[DEBUG] HTML preview created")
                 
                 success = f"Done! Created {len(subtitles)} subtitle lines from {len(word_segments)} words."
                 
-                return success, subtitles, editor
+                return success, subtitles, editor, font_fam, font_sz
                 
             except Exception as e:
                 error_msg = f"Error: {str(e)}"
-                return error_msg, [], f"<p style='color: red;'>{error_msg}</p>"
+                print(f"[DEBUG ERROR] {error_msg}")
+                import traceback
+                traceback.print_exc()
+                return error_msg, [], f"<p style='color: red;'>{error_msg}</p>", font_fam, font_sz
         
         def update_preview(subtitles):
             if not subtitles:
@@ -425,18 +466,18 @@ def create_app():
             srt_content = export_to_srt(subtitles)
             return save_file(srt_content, ".srt")
         
-        def do_export_ass(subtitles):
+        def do_export_ass(subtitles, font_fam, font_sz):
             if not subtitles:
                 gr.Warning("No subtitles. Transcribe first.")
                 return None
-            ass_content = export_to_ass_with_colors(subtitles)
+            ass_content = export_to_ass_with_colors(subtitles, font_name=font_fam, font_size=int(font_sz))
             return save_file(ass_content, ".ass")
         
         # Connect
         transcribe_btn.click(
             fn=do_transcribe,
-            inputs=[audio_input, language_dropdown, words_per_line],
-            outputs=[status_text, subtitles_state, editor_html]
+            inputs=[audio_input, language_dropdown, words_per_line, font_family, font_size],
+            outputs=[status_text, subtitles_state, editor_html, font_family_state, font_size_state]
         )
         
         update_preview_btn.click(
@@ -453,7 +494,7 @@ def create_app():
         
         export_ass_btn.click(
             fn=do_export_ass,
-            inputs=[subtitles_state],
+            inputs=[subtitles_state, font_family_state, font_size_state],
             outputs=[ass_file]
         )
         
