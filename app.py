@@ -1,12 +1,7 @@
-# app.py — Five-Word Subtitle Chunker + Lyrics Timecoding + Global Shift + WebVTT + Per-line Editor
-# Version: v1.2.1 (2025-10-25)
+# app.py — Five-Word Subtitle Chunker + Lyrics Timecoding + Global Shift + WebVTT + Per-line Editor + MP4 render
+# Version: v1.3.0 (2025-10-25)
 
-import os
-import re
-import json
-import uuid
-import math
-import tempfile
+import os, re, json, uuid, math, tempfile, subprocess, shlex
 from typing import List, Dict, Tuple, Optional
 
 import gradio as gr
@@ -28,7 +23,6 @@ def normalize_lang(label: Optional[str]) -> Optional[str]:
         return None
     if t in LANG_MAP:
         return LANG_MAP[t]
-    # accept "es (Spanish)" or "Spanish (es)"
     m = re.search(r"\b([a-z]{2,3})\b", t)
     if m:
         return m.group(1)
@@ -50,7 +44,6 @@ def get_asr_model():
     try:
         _ASR_MODEL = whisperx.load_model("small", device=device, compute_type=compute)
     except ValueError as e:
-        # Some CPUs can’t do int8 kernels; fall back automatically.
         if "compute type" in str(e).lower():
             fallback = "int16" if device == "cpu" else "float32"
             _ASR_MODEL = whisperx.load_model("small", device=device, compute_type=fallback)
@@ -59,13 +52,11 @@ def get_asr_model():
     return _ASR_MODEL
 
 # ---------- Transcription ----------
-def transcribe(audio_path: str, language_code: Optional[str]) -> Tuple[List[Dict], str, float, float]:
+def transcribe(audio_path: str, language_code: Optional[str]):
     """
-    Run ASR and return (segments, full_text, t_min, t_max).
-    We do NOT request word timestamps (keeps it fast & compatible).
+    Return: (segments, full_text, t_min, t_max)
     """
     model = get_asr_model()
-    # language_code can be None (auto)
     result = model.transcribe(audio_path, language=language_code)
     segments = result.get("segments", [])
     full_text = " ".join((seg.get("text") or "").strip() for seg in segments).strip()
@@ -73,7 +64,8 @@ def transcribe(audio_path: str, language_code: Optional[str]) -> Tuple[List[Dict
         t_min = float(segments[0].get("start", 0.0) or 0.0)
         t_max = float(segments[-1].get("end", 0.0) or t_min)
     else:
-        t_min, t_max = 0.0, 0.0
+        t_min = 0.0
+        t_max = 0.0
     return segments, full_text, t_min, t_max
 
 # ---------- Chunking (5-word by default) ----------
@@ -112,9 +104,7 @@ def parse_lyrics(raw: str) -> List[str]:
 def word_count(s: str) -> int:
     return len([t for t in s.split() if t])
 
-def align_lyrics_to_timeline(
-    lyrics_lines: List[str], t_min: float, t_max: float
-) -> List[Dict]:
+def align_lyrics_to_timeline(lyrics_lines: List[str], t_min: float, t_max: float) -> List[Dict]:
     chunks: List[Dict] = []
     total_words = sum(max(1, word_count(ln)) for ln in lyrics_lines) or 1
     total_duration = max(0.0, t_max - t_min)
@@ -146,9 +136,7 @@ def apply_global_shift(chunks: List[Dict], shift_sec: float) -> List[Dict]:
 # ---------- Formatting: SRT / ASS / VTT ----------
 def fmt_srt_time(t: float) -> str:
     t = max(0.0, t)
-    h = int(t // 3600)
-    m = int((t % 3600) // 60)
-    s = int(t % 60)
+    h = int(t // 3600); m = int((t % 3600) // 60); s = int(t % 60)
     ms = int(round((t - math.floor(t)) * 1000))
     return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
@@ -165,9 +153,7 @@ def hex_to_ass_bgr(hex_color: str) -> str:
     hx = hex_color.lstrip("#")
     if len(hx) == 3:
         hx = "".join(ch * 2 for ch in hx)
-    r = int(hx[0:2], 16)
-    g = int(hx[2:4], 16)
-    b = int(hx[4:6], 16)
+    r = int(hx[0:2], 16); g = int(hx[2:4], 16); b = int(hx[4:6], 16)
     return f"&H{b:02X}{g:02X}{r:02X}&"
 
 def to_ass(
@@ -210,9 +196,7 @@ def to_ass(
 
     def ass_time(t: float) -> str:
         t = max(0.0, t)
-        h = int(t // 3600)
-        m = int((t % 3600) // 60)
-        s = int(t % 60)
+        h = int(t // 3600); m = int((t % 3600) // 60); s = int(t % 60)
         cs = int(round((t - math.floor(t)) * 100))  # centiseconds
         return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
 
@@ -225,9 +209,7 @@ def to_ass(
 
 def fmt_vtt_time(t: float) -> str:
     t = max(0.0, t)
-    h = int(t // 3600)
-    m = int((t % 3600) // 60)
-    s = int(t % 60)
+    h = int(t // 3600); m = int((t % 3600) // 60); s = int(t % 60)
     ms = int(round((t - math.floor(t)) * 1000))
     if h > 0:
         return f"{h:02}:{m:02}:{s:02}.{ms:03}"
@@ -372,6 +354,61 @@ def build_from_chunks(
 
     return prev_html, playres_x, playres_y, srt_path, ass_path, vtt_path
 
+# ---------- Render MP4 with FFmpeg ----------
+VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm"}
+
+def _hex_to_ffmpeg_color(hex_color: str) -> str:
+    # ffmpeg lavfi 'color=' accepts 0xRRGGBB reliably
+    hx = hex_color.lstrip("#")
+    if len(hx) == 3:
+        hx = "".join(ch * 2 for ch in hx)
+    return "0x" + hx
+
+def render_subtitle_video(
+    media_path: str,
+    ass_path: str,
+    layout_preset: str,
+    duration_hint: float,
+    bg_hex: str,
+) -> str:
+    """Return path to rendered mp4 with burned-in subs."""
+    out_path = os.path.join(tempfile.gettempdir(), f"render_{uuid.uuid4().hex}.mp4")
+    w, h = compute_canvas_size(layout_preset)
+    fps = 30
+    ext = os.path.splitext(media_path)[1].lower()
+
+    if ext in VIDEO_EXTS:
+        # Burn onto existing video
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", media_path,
+            "-vf", f"ass={ass_path}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+            "-c:a", "copy",
+            out_path,
+        ]
+    else:
+        # Audio only: create color canvas, add audio, burn ASS
+        bg = _hex_to_ffmpeg_color(bg_hex)
+        dur = max(0.1, float(duration_hint or 0.0))
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", f"color=size={w}x{h}:rate={fps}:duration={dur}:color={bg}",
+            "-i", media_path,
+            "-vf", f"ass={ass_path}",
+            "-shortest",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            out_path,
+        ]
+
+    # Run
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"FFmpeg failed: {e.stderr.decode(errors='ignore')[:500]} ...")
+    return out_path
+
 # ---------- Main pipeline ----------
 def run_pipeline(
     audio_path,
@@ -407,7 +444,9 @@ def run_pipeline(
     prev_html, px, py, srt_path, ass_path, vtt_path = build_from_chunks(
         chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
     )
-    return chunks, table, prev_html, px, py, srt_path, ass_path, vtt_path
+    # Keep some state for rendering:
+    duration = max(0.0, t_max - t_min)
+    return chunks, table, prev_html, px, py, srt_path, ass_path, vtt_path, duration
 
 # ---------- UI ----------
 FONT_CHOICES = ["Default", "Arial", "Roboto", "Open Sans", "Lato", "Noto Sans", "Montserrat"]
@@ -424,16 +463,21 @@ h1, h2, h3, .prose h1, .prose h2, .prose h3 { color: #cfe2ff !important; }
 """
 
 with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
-    gr.Markdown("### <span id='header_version'>Build: v1.2.1</span>")
-    gr.Markdown("# 🎬 Chunker + Lyrics + Global Shift + Editor  \nFast ASR → edit timing → SRT/ASS/VTT")
+    gr.Markdown("### <span id='header_version'>Build: v1.3.0</span>")
+    gr.Markdown("# 🎬 Chunker + Lyrics + Global Shift + Editor + **MP4 Render**")
 
-    chunks_state = gr.State([])  # List[Dict]
-    status = gr.State("")        # last error message
+    # States
+    chunks_state = gr.State([])          # List[Dict]
+    duration_state = gr.State(0.0)       # float
+    last_ass_state = gr.State("")        # str
+    last_layout_state = gr.State(LAYOUT_CHOICES[0])
+    last_bg_state = gr.State("#111111")
+    status_box = gr.Textbox(label="Status", value="", interactive=False)
 
     with gr.Row():
         with gr.Column(scale=3):
             with gr.Group():
-                audio = gr.Audio(label="Audio / Video", type="filepath")
+                media = gr.Audio(label="Audio / Video (mp3, wav, mp4...)", type="filepath")
                 language = gr.Dropdown(choices=[c[0] for c in LANG_CHOICES], value="Auto-detect", label="Language")
                 words_per_chunk = gr.Slider(3, 8, value=5, step=1, label="Words per chunk (when not using lyrics)")
                 layout_choice = gr.Dropdown(LAYOUT_CHOICES, value=LAYOUT_CHOICES[0], label="Layout preset")
@@ -451,8 +495,6 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
 
                 run_btn = gr.Button("Run", variant="primary")
 
-            status_box = gr.Textbox(label="Status", value="", interactive=False)
-
             preview_html_box = gr.HTML(label="Preview")
             chunks_json = gr.JSON(label="Chunks (debug / export)")
             playres_x_box = gr.Number(label="PlayResX", interactive=False)
@@ -462,6 +504,11 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
                 srt_dl = gr.DownloadButton("Download SRT")
                 ass_dl = gr.DownloadButton("Download ASS")
                 vtt_dl = gr.DownloadButton("Download VTT")
+
+            gr.Markdown("### Render to MP4")
+            render_btn = gr.Button("Render subtitle video (MP4) 🎥", variant="primary")
+            rendered_video = gr.Video(label="Rendered preview")
+            rendered_dl = gr.DownloadButton("Download MP4")
 
         with gr.Column(scale=1):
             with gr.Group(elem_classes=["settings-card"]):
@@ -498,28 +545,29 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
 
     def _run_and_return(*args):
         try:
-            chunks, table_data, prev_html, px, py, srt_path, ass_path, vtt_path = run_pipeline(*args)
+            chunks, table_data, prev_html, px, py, srt_path, ass_path, vtt_path, duration = run_pipeline(*args)
             return (
                 "",                    # status ok
-                chunks,                # state
+                chunks, duration, ass_path, args[3], args[10],  # update states (chunks, duration, last ASS, layout, bg)
                 prev_html, chunks, px, py,
                 srt_path, ass_path, vtt_path,
                 table_data
             )
         except Exception as e:
-            return (f"Error: {e}", gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip())
+            return (f"Error: {e}", gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(),
+                    gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip())
 
     run_btn.click(
         _run_and_return,
         inputs=[
-            audio, language, words_per_chunk,
+            media, language, words_per_chunk,
             layout_choice, font_family, font_size,
             text_color, outline_color, outline_w,
             bg_box, bg_color, use_lyrics, lyrics_box, global_shift
         ],
         outputs=[
-            status_box,             # NEW: show errors
-            chunks_state,           # update state
+            status_box,             # status
+            chunks_state, duration_state, last_ass_state, last_layout_state, last_bg_state,
             preview_html_box, chunks_json, playres_x_box, playres_y_box,
             srt_dl, ass_dl, vtt_dl,
             table
@@ -529,26 +577,27 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
     # Apply edits from table to state + rebuild preview/files
     def _apply_edits(table_data, layout_preset, font, size, text_hex, outline_hex, outline_w, bg_box, bg_hex, current_chunks):
         try:
-            new_chunks = table_to_chunks(table_data)
-            if not new_chunks:
-                new_chunks = current_chunks or []
+            new_chunks = table_to_chunks(table_data) or (current_chunks or [])
             prev_html, px, py, srt_path, ass_path, vtt_path = build_from_chunks(
                 new_chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
             )
             return (
                 "",                   # status ok
                 new_chunks,           # state
+                ass_path, layout_preset, bg_hex,   # refresh states needed to render
                 prev_html, new_chunks, px, py,
                 srt_path, ass_path, vtt_path,
                 chunks_to_table(new_chunks)
             )
         except Exception as e:
-            return (f"Error: {e}", gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip())
+            return (f"Error: {e}", gr.Skip(), gr.Skip(), gr.Skip(),
+                    gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip())
 
     apply_edits_btn.click(
         _apply_edits,
         inputs=[table, layout_choice, font_family, font_size, text_color, outline_color, outline_w, bg_box, bg_color, chunks_state],
-        outputs=[status_box, chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
+        outputs=[status_box, chunks_state, last_ass_state, last_layout_state, last_bg_state,
+                 preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
     )
 
     # Sort by start
@@ -559,18 +608,20 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
                 new_chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
             )
             return (
-                "", new_chunks,
+                "", new_chunks, ass_path, layout_preset, bg_hex,
                 prev_html, new_chunks, px, py,
                 srt_path, ass_path, vtt_path,
                 chunks_to_table(new_chunks)
             )
         except Exception as e:
-            return (f"Error: {e}", gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip())
+            return (f"Error: {e}", gr.Skip(), gr.Skip(), gr.Skip(),
+                    gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip())
 
     sort_btn.click(
         _sort_chunks,
         inputs=[chunks_state, layout_choice, font_family, font_size, text_color, outline_color, outline_w, bg_box, bg_color],
-        outputs=[status_box, chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
+        outputs=[status_box, chunks_state, last_ass_state, last_layout_state, last_bg_state,
+                 preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
     )
 
     # Quick nudges: ±0.10s
@@ -581,23 +632,44 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
                 new_chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
             )
             return (
-                "", new_chunks,
+                "", new_chunks, ass_path, layout_preset, bg_hex,
                 prev_html, new_chunks, px, py,
                 srt_path, ass_path, vtt_path,
                 chunks_to_table(new_chunks)
             )
         except Exception as e:
-            return (f"Error: {e}", gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip())
+            return (f"Error: {e}", gr.Skip(), gr.Skip(), gr.Skip(),
+                    gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip())
 
     nudge_earlier_btn.click(
         _nudge,
         inputs=[chunks_state, gr.State(-0.10), layout_choice, font_family, font_size, text_color, outline_color, outline_w, bg_box, bg_color],
-        outputs=[status_box, chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
+        outputs=[status_box, chunks_state, last_ass_state, last_layout_state, last_bg_state,
+                 preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
     )
     nudge_later_btn.click(
         _nudge,
         inputs=[chunks_state, gr.State(+0.10), layout_choice, font_family, font_size, text_color, outline_color, outline_w, bg_box, bg_color],
-        outputs=[status_box, chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
+        outputs=[status_box, chunks_state, last_ass_state, last_layout_state, last_bg_state,
+                 preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
+    )
+
+    # Render MP4
+    def _render(media_path, ass_path, layout_preset, duration_hint, bg_hex):
+        try:
+            if not media_path:
+                raise ValueError("Please upload audio/video first.")
+            if not ass_path or not os.path.exists(ass_path):
+                raise ValueError("No subtitle file yet. Click Run first.")
+            out_mp4 = render_subtitle_video(media_path, ass_path, layout_preset, float(duration_hint or 0.0), bg_hex)
+            return ("", out_mp4, out_mp4)
+        except Exception as e:
+            return (f"Error: {e}", None, None)
+
+    render_btn.click(
+        _render,
+        inputs=[media, last_ass_state, last_layout_state, duration_state, last_bg_state],
+        outputs=[status_box, rendered_video, rendered_dl],
     )
 
 if __name__ == "__main__":
