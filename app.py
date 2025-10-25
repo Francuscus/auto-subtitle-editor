@@ -1,439 +1,399 @@
-# app.py — Colorvideo Subs v1.1
-# - Fixes State wiring and render button path
-# - Robust color parsing (#hex or rgb/rgba)
-# - Text color now affects preview and ASS export
+# app.py — Colorvideo Subs (v0.9.3)
 
-import os, re, json, subprocess, tempfile, math
-from typing import List, Dict, Tuple, Optional
+from __future__ import annotations
+import os, re, json, math, subprocess, uuid, shutil
+from pathlib import Path
+from typing import List, Tuple, Dict, Any, Optional
 
 import gradio as gr
+
+# ASR
 import torch
 import whisperx
 
-# ----------------------------
-# Config / constants
-# ----------------------------
-WHISPER_MODEL_SIZE = "small"
-USE_CUDA = torch.cuda.is_available()
-DEVICE = "cuda" if USE_CUDA else "cpu"
-COMPUTE_TYPE = "float16" if USE_CUDA else "int8"
+# ---------- Paths ----------
+TMP = Path("/tmp")
+OUT = TMP / "subs"
+OUT.mkdir(exist_ok=True, parents=True)
 
-# Supported languages menu (kept short as you asked)
+# ---------- Language helpers ----------
 LANG_CHOICES = [
     ("Auto-detect", "auto"),
     ("Spanish (es)", "es"),
     ("Hungarian (hu)", "hu"),
     ("English (en)", "en"),
 ]
+LANG_MAP = {"auto": None, "es": "es", "hu": "hu", "en": "en",
+            "spanish":"es","hungarian":"hu","english":"en"}
 
-LAYOUT_CHOICES = [
-    "16:9 (YouTube)",
-    "9:16 (TikTok)",
-    "1:1 (Square)"
-]
-
-# ----------------------------
-# Helpers: language + model
-# ----------------------------
-
-def normalize_lang(lang_ui: Optional[str]) -> Optional[str]:
-    if not lang_ui or lang_ui == "auto":
+def norm_lang(s: Optional[str]) -> Optional[str]:
+    if not s:
         return None
-    t = lang_ui.strip().lower()
-    # accept 'es', 'hu', 'en' directly
-    if t in {"es","hu","en"}:
-        return t
-    # accept "spanish (es)" etc.
+    t = s.strip().lower()
+    if t in LANG_MAP:
+        return LANG_MAP[t]
     m = re.search(r"\b([a-z]{2,3})\b", t)
     return m.group(1) if m else None
 
-_asr_model = None
-def get_asr():
-    global _asr_model
-    if _asr_model is not None:
-        return _asr_model
-    try:
-        _asr_model = whisperx.load_model(
-            WHISPER_MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE
-        )
-    except ValueError as e:
-        # CPU with no int8 kernels fallback
-        if "compute type" in str(e).lower():
-            fallback = "int16" if DEVICE == "cpu" else "float32"
-            _asr_model = whisperx.load_model(
-                WHISPER_MODEL_SIZE, device=DEVICE, compute_type=fallback
-            )
-        else:
-            raise
-    return _asr_model
-
-# ----------------------------
-# Helpers: colors
-# ----------------------------
-
-def parse_color(s: str) -> Tuple[int,int,int]:
-    """
-    Accept '#rrggbb', '#rgb', 'rgb(r,g,b)', 'rgba(r,g,b,a)' and return (r,g,b).
-    """
-    if not s:
-        return (255,255,255)
-    s = s.strip()
-    if s.startswith("#"):
-        hx = s[1:]
+# ---------- Color helpers ----------
+def _parse_color_any(c: str) -> Tuple[int,int,int]:
+    """Return (r,g,b) from '#RRGGBB' or 'rgb(a)' strings."""
+    c = (c or "").strip()
+    if c.startswith("#"):
+        hx = c.lstrip("#")
         if len(hx) == 3:
-            r = int(hx[0]*2, 16); g = int(hx[1]*2, 16); b = int(hx[2]*2, 16)
-            return (r,g,b)
-        if len(hx) >= 6:
-            return (int(hx[0:2],16), int(hx[2:4],16), int(hx[4:6],16))
-    m = re.match(r"rgba?\(([^)]+)\)", s, flags=re.I)
+            hx = "".join(ch*2 for ch in hx)
+        hx = (hx + "000000")[:6]
+        r = int(hx[0:2], 16); g = int(hx[2:4], 16); b = int(hx[4:6], 16)
+        return r,g,b
+    m = re.match(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", c)
     if m:
-        parts = [p.strip() for p in m.group(1).split(",")]
-        r = int(float(parts[0])); g = int(float(parts[1])); b = int(float(parts[2]))
-        return (r,g,b)
-    # fallback white
+        r,g,b = map(int, m.groups())
+        return max(0,min(255,r)), max(0,min(255,g)), max(0,min(255,b))
+    # default white if unknown
     return (255,255,255)
 
-def rgb_to_ass_bgr(r:int,g:int,b:int, alpha: int = 0) -> str:
-    """
-    ASS color format is &HAABBGGRR (hex). We’ll keep alpha 00 (opaque).
-    """
-    aa = max(0, min(alpha, 255))
-    return f"&H{aa:02X}{b:02X}{g:02X}{r:02X}"
+def hex_to_ass_bgr(color: str, alpha: int = 0) -> str:
+    """ASS uses &HAA BB GG RR — we return like &H00BBGGRR"""
+    r,g,b = _parse_color_any(color)
+    a = max(0, min(255, alpha))
+    return f"&H{a:02X}{b:02X}{g:02X}{r:02X}"
 
-# ----------------------------
-# Subtitle formatting
-# ----------------------------
+# ---------- ASR model ----------
+_asr = None
+def get_asr():
+    global _asr
+    if _asr is not None:
+        return _asr
+    use_cuda = torch.cuda.is_available()
+    device = "cuda" if use_cuda else "cpu"
+    compute = "float16" if use_cuda else "int8"   # CPU-safe
+    try:
+        _asr = whisperx.load_model("small", device=device, compute_type=compute)
+    except ValueError:
+        # last-resort fallback on some CPUs
+        _asr = whisperx.load_model("small", device=device, compute_type="int16" if device=="cpu" else "float32")
+    return _asr
 
+# ---------- Transcribe ----------
+def transcribe(audio_path: str, language_code: Optional[str]) -> Tuple[List[Dict], str, float]:
+    model = get_asr()
+    res = model.transcribe(audio_path, language=language_code)
+    segs = res["segments"]
+    text = " ".join(s["text"].strip() for s in segs)
+    # estimate duration
+    duration = 0.0
+    if segs:
+        duration = float(segs[-1]["end"])
+    return segs, text, duration
+
+# ---------- Chunking ----------
+def chunk_by_words(text: str, words_per: int = 5) -> List[Dict]:
+    tokens = text.strip().split()
+    chunks = []
+    i = 0
+    t = 0.0
+    step = 1.5  # naive timing per chunk; refined later if aligning to segs
+    while i < len(tokens):
+        w = tokens[i:i+max(1,words_per)]
+        s = " ".join(w)
+        chunks.append({"start": t, "end": t+step, "text": s})
+        t += step
+        i += words_per
+    return chunks
+
+def retime_to_segments(lyrics_lines: List[str], segs: List[Dict]) -> List[Dict]:
+    """Distribute user lyrics across detected segments."""
+    out = []
+    if not lyrics_lines:
+        return out
+    seg_idx = 0
+    for line in lyrics_lines:
+        line = line.strip()
+        if not line:
+            continue
+        if seg_idx >= len(segs):
+            # append to last segment end + small pad
+            st = out[-1]["end"] + 0.2 if out else 0.0
+            out.append({"start": st, "end": st+1.2, "text": line})
+        else:
+            st = float(segs[seg_idx]["start"])
+            en = float(segs[seg_idx]["end"])
+            out.append({"start": st, "end": en, "text": line})
+            seg_idx += 1
+    return out
+
+# ---------- Formats ----------
 def to_srt(chunks: List[Dict]) -> str:
+    def fmt(t: float):
+        h = int(t//3600); m = int((t%3600)//60); s = int(t%60); ms = int((t - int(t))*1000)
+        return f"{h:02}:{m:02}:{s:02},{ms:03}"
     lines = []
-    for i,c in enumerate(chunks, start=1):
-        t1 = c["start"]; t2 = c["end"]
-        def fmt(t):
-            ms = int((t - int(t)) * 1000)
-            s = int(t) % 60
-            m = (int(t) // 60) % 60
-            h = int(t) // 3600
-            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-        lines.append(str(i))
-        lines.append(f"{fmt(t1)} --> {fmt(t2)}")
-        lines.append(c["text"].strip())
-        lines.append("")
+    for i,c in enumerate(chunks,1):
+        lines += [str(i),
+                  f"{fmt(c['start'])} --> {fmt(c['end'])}",
+                  c['text'].strip(), ""]
     return "\n".join(lines)
 
 def to_vtt(chunks: List[Dict]) -> str:
-    out = ["WEBVTT",""]
+    def fmt(t: float):
+        h = int(t//3600); m = int((t%3600)//60); s = int(t%60); ms = int((t - int(t))*1000)
+        return f"{h:02}:{m:02}:{s:02}.{ms:03}"
+    lines = ["WEBVTT",""]
     for c in chunks:
-        def fmt(t):
-            ms = int((t - int(t)) * 1000)
-            s = int(t) % 60
-            m = (int(t) // 60) % 60
-            h = int(t) // 3600
-            return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
-        out.append(f"{fmt(c['start'])} --> {fmt(c['end'])}")
-        out.append(c["text"].strip())
-        out.append("")
-    return "\n".join(out)
+        lines += [f"{fmt(c['start'])} --> {fmt(c['end'])}",
+                  c['text'].strip(), ""]
+    return "\n".join(lines)
 
-def to_ass(chunks: List[Dict], font:str, size:int,
-           text_hex: str, outline_hex: str, outline_w:int,
-           boxed_bg: bool, bg_hex: str) -> str:
-    # Parse colors robustly
-    tr,tg,tb = parse_color(text_hex)
-    or_,og,ob = parse_color(outline_hex)
-    br,bg,bb = parse_color(bg_hex)
+def to_ass(chunks: List[Dict], *,
+           font: str, size: int,
+           txt_color: str,
+           outline_w: int, outline_color: str,
+           boxed_bg: bool, bg_color: str) -> str:
+    prim = hex_to_ass_bgr(txt_color)         # &H00BBGGRR
+    outc = hex_to_ass_bgr(outline_color)
+    back = hex_to_ass_bgr(bg_color, alpha=0x40 if boxed_bg else 0xFF)  # semi if boxed, opaque if not used
 
-    primary = rgb_to_ass_bgr(tr,tg,tb, 0)
-    outline = rgb_to_ass_bgr(or_,og,ob, 0)
-    back    = rgb_to_ass_bgr(br,bg,bb, 0)
-
-    # BorderStyle: 1=Outline, 3=Opaque box
-    border_style = 3 if boxed_bg else 1
-
-    header = [
-        "[Script Info]",
-        "ScriptType: v4.00+",
-        "PlayResX: 1280",
-        "PlayResY: 720",
-        "",
-        "[V4+ Styles]",
+    style = (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        "PlayResX: 1280\n"
+        "PlayResY: 720\n"
+        "\n[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
-        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
-        "Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Default,{font},{size},{primary},&H00FFFFFF,{outline},{back},"
-        f"0,0,0,0,100,100,0,0,{border_style},{max(outline_w,0)},0,2,30,30,24,0",
-        "",
-        "[Events]",
-        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
-    ]
-
-    def ts(t: float) -> str:
-        cs = int((t - int(t)) * 100)
-        s = int(t) % 60
-        m = (int(t) // 60) % 60
-        h = int(t) // 3600
-        return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
-
-    lines = []
-    for c in chunks:
-        text = c["text"].replace("\n"," ").strip()
-        lines.append(f"Dialogue: 0,{ts(c['start'])},{ts(c['end'])},Default,,0,0,0,,{text}")
-
-    return "\n".join(header + lines)
-
-# ----------------------------
-# Chunking: cap ~5 words each
-# ----------------------------
-
-def split_into_chunks(segments: List[Dict], max_words:int = 5) -> List[Dict]:
-    chunks = []
-    for seg in segments:
-        words = seg["text"].strip().split()
-        if not words:
-            continue
-        cur = []
-        cur_start = seg["start"]
-        span = max(seg["end"] - seg["start"], 0.001) / max(len(words),1)
-        for i,w in enumerate(words):
-            if not cur:
-                cur_start = seg["start"] + i*span
-            cur.append(w)
-            if len(cur) >= max_words:
-                start = cur_start
-                end   = seg["start"] + (i+1)*span
-                chunks.append({"start":start, "end":end, "text":" ".join(cur)})
-                cur = []
-        if cur:
-            end = seg["end"]
-            chunks.append({"start":cur_start, "end":end, "text":" ".join(cur)})
-    return chunks
-
-# ----------------------------
-# ASR
-# ----------------------------
-
-def transcribe(audio_path: str, language_code: Optional[str]) -> Tuple[List[Dict], str, float]:
-    model = get_asr()
-    # faster_whisper pipeline in whisperx ignores word_timestamps kw; keep it simple
-    result = model.transcribe(audio_path, language=language_code)
-    segments: List[Dict] = result["segments"]
-    # Total duration fallback
-    total = segments[-1]["end"] if segments else 0.0
-    text = " ".join(s["text"].strip() for s in segments)
-    return segments, text, total
-
-# ----------------------------
-# Build outputs from chunks
-# ----------------------------
-
-def build_from_chunks(
-    media_path: str,
-    chunks: List[Dict],
-    font: str, fsize: int,
-    text_color: str, outline_color: str, outline_w: int,
-    boxed_bg: bool, bg_color: str,
-    layout: str
-) -> Tuple[str, str, str]:
-    # Preview HTML (uses CSS color directly)
-    styled_html = f"""
-<div style="
-  font-family:{font if font!='Default' else 'inherit'}, sans-serif;
-  font-size:{int(fsize)}px;
-  line-height:1.35;
-  color:{text_color};
-  text-shadow:
-    -{outline_w}px 0 {outline_color},
-    {outline_w}px 0 {outline_color},
-    0 -{outline_w}px {outline_color},
-    0 {outline_w}px {outline_color};
-  {'background:'+bg_color+'; padding:4px 8px; border-radius:6px;' if boxed_bg else ''}
-">
-{" ".join([c['text'] for c in chunks])}
-</div>
-""".strip()
-
-    # Save subtitle files
-    srt_text = to_srt(chunks)
-    vtt_text = to_vtt(chunks)
-    ass_text = to_ass(chunks, font if font!="Default" else "Roboto",
-                      int(fsize), text_color, outline_color, int(outline_w),
-                      bool(boxed_bg), bg_color)
-
-    tmp = tempfile.mkdtemp(prefix="subs_")
-    srt_path = os.path.join(tmp, "subtitles.srt")
-    ass_path = os.path.join(tmp, "subtitles.ass")
-    vtt_path = os.path.join(tmp, "subtitles.vtt")
-    with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_text)
-    with open(ass_path, "w", encoding="utf-8") as f: f.write(ass_text)
-    with open(vtt_path, "w", encoding="utf-8") as f: f.write(vtt_text)
-
-    return styled_html, srt_path, ass_path, vtt_path
-
-# ----------------------------
-# Render with ffmpeg (burn ASS)
-# ----------------------------
-
-def render_video(media_path: str, ass_path: str, layout:str, duration: float) -> str:
-    if not media_path or not os.path.exists(media_path):
-        raise gr.Error("No input media.")
-    if not ass_path or not os.path.exists(ass_path):
-        raise gr.Error("No ASS file. Click Run first.")
-
-    # Pick resolution
-    if layout.startswith("16:9"):
-        w,h = 1280,720
-    elif layout.startswith("9:16"):
-        w,h = 1080,1920
-    else:
-        w,h = 1080,1080
-
-    out_mp4 = os.path.join(tempfile.mkdtemp(prefix="render_"), "out.mp4")
-    cmd = [
-        "ffmpeg","-y",
-        "-i", media_path,
-        "-vf", f"scale={w}:{h},ass='{ass_path}'",
-        "-c:v","libx264","-preset","veryfast","-crf","18",
-        "-c:a","aac","-b:a","192k",
-        out_mp4
-    ]
-    subprocess.run(cmd, check=True)
-    return out_mp4
-
-# ----------------------------
-# Pipeline (Run button)
-# ----------------------------
-
-def run_pipeline(
-    media_path: str,
-    language_ui: str,
-    words_per_chunk: int,
-    layout: str,
-    font: str, fsize: int, text_color: str,
-    outline_color: str, outline_w: int,
-    boxed_bg: bool, bg_color: str,
-    global_shift: float
-):
-    if not media_path:
-        raise gr.Error("Please upload audio or video first.")
-
-    lang_code = normalize_lang(language_ui)
-    segments, _, duration = transcribe(media_path, lang_code)
-    chunks = split_into_chunks(segments, max(1,int(words_per_chunk)))
-
-    # global shift
-    if abs(global_shift) > 1e-6:
-        for c in chunks:
-            c["start"] = max(0.0, c["start"] + global_shift)
-            c["end"] = max(c["start"] + 0.01, c["end"] + global_shift)
-
-    preview_html, srt_path, ass_path, vtt_path = build_from_chunks(
-        media_path, chunks, font, fsize, text_color, outline_color, outline_w, boxed_bg, bg_color, layout
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
+        "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Sub,{font},{size},{prim},&H00000000,{outc},{back},0,0,0,0,100,100,0,0,1,{outline_w},0,2,60,60,36,1\n"
+        "\n[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
 
-    # simple table
-    table = [{"start":round(c["start"],2),"end":round(c["end"],2),"text":c["text"]} for c in chunks]
-    return chunks, table, preview_html, srt_path, ass_path, vtt_path, duration
+    def fmt(t: float):
+        h = int(t//3600); m = int((t%3600)//60); s = int(t%60); cs = int(round((t - int(t))*100))
+        return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
 
-# ----------------------------
-# UI
-# ----------------------------
+    lines = [style]
+    for c in chunks:
+        start = fmt(float(c["start"])); end = fmt(float(c["end"]))
+        text = c["text"].replace("\n"," ").replace("\r"," ")
+        lines.append(f"Dialogue: 0,{start},{end},Sub,,0,0,20,,{text}")
+    return "\n".join(lines)
 
-theme = gr.themes.Soft(primary_hue="violet", neutral_hue="slate")
+# ---------- Simple preview HTML ----------
+def preview_html(chunks: List[Dict], font: str, size: int, color: str,
+                 outline_w: int, outline_color: str, boxed: bool, bg_color: str) -> str:
+    box_css = f"background:{bg_color}; padding:4px 8px; border-radius:6px;" if boxed else ""
+    return f"""
+<div style="display:flex;align-items:center;justify-content:center;height:220px;border:1px solid #333;border-radius:8px;background:#111;">
+  <span style="font-family:{font},sans-serif;font-size:{size}px;color:{color};
+               text-shadow:-{outline_w}px 0 {outline_color}, {outline_w}px 0 {outline_color},
+                           0 -{outline_w}px {outline_color}, 0 {outline_w}px {outline_color}; {box_css}">
+    {chunks[0]['text'] if chunks else ''}
+  </span>
+</div>
+"""
+
+# ---------- Build everything from either auto chunks or lyrics ----------
+def build_from_chunks(chunks: List[Dict],
+                      font: str, size: int,
+                      txt_color: str, outline_color: str, outline_w: int,
+                      boxed_bg: bool, bg_color: str) -> Tuple[str,Dict,Dict,Path,Path,Path]:
+    # for table/debug
+    table_data = [{"start": round(c["start"],2), "end": round(c["end"],2), "text": c["text"]} for c in chunks]
+
+    # files
+    sid = uuid.uuid4().hex
+    srt_path = OUT / f"{sid}.srt"
+    ass_path = OUT / f"{sid}.ass"
+    vtt_path = OUT / f"{sid}.vtt"
+    srt_path.write_text(to_srt(chunks), encoding="utf-8")
+    vtt_path.write_text(to_vtt(chunks), encoding="utf-8")
+
+    ass_txt = to_ass(chunks,
+                     font=font, size=int(size),
+                     txt_color=txt_color,
+                     outline_w=int(outline_w), outline_color=outline_color,
+                     boxed_bg=boxed_bg, bg_color=bg_color)
+    ass_path.write_text(ass_txt, encoding="utf-8")
+
+    prev = preview_html(chunks, font, int(size), txt_color, int(outline_w), outline_color, boxed_bg, bg_color)
+    return prev, {"data":table_data}, {"chunks":chunks}, srt_path, ass_path, vtt_path
+
+# ---------- Render MP4 with ASS overlay ----------
+def render_mp4(input_media: str, ass_file: str) -> str:
+    out_mp4 = OUT / f"{uuid.uuid4().hex}.mp4"
+    cmd = [
+        "ffmpeg","-y",
+        "-i", input_media,
+        "-vf", f"ass={ass_file}",
+        "-c:a","copy",
+        str(out_mp4)
+    ]
+    subprocess.run(cmd, check=True)
+    return str(out_mp4)
+
+# ---------- Gradio States ----------
+srt_path_state = gr.State()
+ass_path_state = gr.State()
+vtt_path_state = gr.State()
+input_media_state = gr.State()
+chunks_state = gr.State()
+duration_state = gr.State(0.0)
+
+# ---------- Pipeline ----------
+def run_pipeline(audio_path: str,
+                 language_ui: str,
+                 words_per_chunk: int,
+                 layout_preset: str,
+                 lyrics_mode: bool,
+                 pasted_lyrics: str,
+                 global_shift: float,
+                 font: str, font_size: int, text_color: str,
+                 outline_color: str, outline_w: int,
+                 boxed_bg: bool, bg_color: str):
+
+    try:
+        if not audio_path:
+            return ("Please upload audio/video first.", gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(),
+                    gr.skip(), gr.skip(), gr.skip())
+
+        lang = norm_lang(language_ui)
+        segs, joined, dur = transcribe(audio_path, lang)
+
+        # pick chunks
+        if lyrics_mode and pasted_lyrics.strip():
+            lines = [ln for ln in pasted_lyrics.splitlines() if ln.strip()]
+            chunks = retime_to_segments(lines, segs)
+        else:
+            chunks = chunk_by_words(joined, max(1,int(words_per_chunk)))
+
+        # apply global shift
+        if abs(global_shift) > 1e-6:
+            for c in chunks:
+                c["start"] = max(0.0, float(c["start"]) + global_shift)
+                c["end"] = max(c["start"] + 0.01, float(c["end"]) + global_shift)
+
+        prev_html, table_json, chunks_json, srt_p, ass_p, vtt_p = build_from_chunks(
+            chunks, font, font_size, text_color, outline_color, outline_w, boxed_bg, bg_color
+        )
+
+        return (prev_html, table_json, chunks_json,
+                str(srt_p), str(ass_p), str(vtt_p),
+                audio_path, json.dumps({"duration": dur}), json.dumps({"ok": True}))
+
+    except Exception as e:
+        return (f"Error: {e}", gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip())
+
+def nudge(chunks_json: Dict, delta: float, apply: bool):
+    try:
+        if not apply:
+            return chunks_json
+        chunks = chunks_json.get("chunks", [])
+        for c in chunks:
+            c["start"] = max(0.0, float(c["start"]) + delta)
+            c["end"] = max(c["start"] + 0.01, float(c["end"]) + delta)
+        return {"chunks": chunks}
+    except Exception:
+        return chunks_json
+
+def refresh_build(chunks_json: Dict,
+                  font: str, font_size: int, text_color: str,
+                  outline_color: str, outline_w: int,
+                  boxed_bg: bool, bg_color: str):
+    try:
+        chunks = chunks_json.get("chunks", [])
+        prev_html, table_json, chunks_json2, srt_p, ass_p, vtt_p = build_from_chunks(
+            chunks, font, font_size, text_color, outline_color, outline_w, boxed_bg, bg_color
+        )
+        return (prev_html, table_json, chunks_json2, str(srt_p), str(ass_p), str(vtt_p))
+    except Exception as e:
+        return (f"Error: {e}", gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip())
+
+def do_render(mp4_btn, input_media: str, ass_path: str):
+    # mp4_btn is just the click event payload, unused
+    if not input_media or not ass_path:
+        raise gr.Error("Run the pipeline first, then render.")
+    try:
+        out_path = render_mp4(input_media, ass_path)
+        return out_path
+    except subprocess.CalledProcessError as e:
+        raise gr.Error(f"ffmpeg failed: {e}")
+
+# ---------- UI ----------
 custom_css = """
 .gradio-container { max-width: 1200px !important; }
 """
 
-with gr.Blocks(theme=theme, css=custom_css) as demo:
-    gr.Markdown("## 🎨 Colorvideo Subs — v1.1")
+with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
+    gr.Markdown("### 🎨 Colorvideo Subs — v0.9.3")
 
     with gr.Row():
         with gr.Column(scale=3):
-            media = gr.Audio(label="Audio / Video (mp3, wav, mp4…)", type="filepath")
-            language = gr.Dropdown(choices=LANG_CHOICES, value="auto", label="Language")
+            audio = gr.Audio(label="Audio / Video (mp3, wav, mp4…)", type="filepath")
+            language = gr.Dropdown(LANG_CHOICES, value="auto", label="Language")
 
-            words_per_chunk = gr.Slider(1,8,value=5,step=1, label="Words per chunk (when not using lyrics)")
-            layout = gr.Dropdown(choices=LAYOUT_CHOICES, value="16:9 (YouTube)", label="Layout preset")
+            words = gr.Slider(3, 8, value=5, step=1, label="Words per chunk (when not using lyrics)")
+            layout = gr.Dropdown(choices=["16:9 (YouTube)","9:16 (TikTok)","1:1 (Square)"],
+                                 value="16:9 (YouTube)", label="Layout preset")
+
+            with gr.Accordion("Lyrics mode (optional)", open=False):
+                use_lyrics = gr.Checkbox(label="Use pasted lyrics to retime", value=False)
+                lyrics_box = gr.Textbox(label="Paste lyrics or lines here", placeholder="One line per subtitle...", lines=6)
 
             with gr.Accordion("Timing tools", open=False):
-                global_shift = gr.Slider(-5,5,value=0,step=0.1, label="Global shift (seconds)")
+                shift = gr.Slider(-5, 5, value=0, step=0.1, label="Global shift (seconds)")
 
             run = gr.Button("Run", variant="primary")
 
-            preview = gr.HTML(label="Preview")
-            table = gr.JSON(label="Segments (table)")
+            prev_html = gr.HTML(label="Preview")
+            table = gr.Dataframe(headers=["start","end","text"], label="Segments table", interactive=False)
+            chunks_json = gr.JSON(label="Chunks JSON")
+
+            srt_dl = gr.File(label="Download SRT")
+            ass_dl = gr.File(label="Download ASS")
+            vtt_dl = gr.File(label="Download VTT")
+
+            render_btn = gr.Button("Render subtitle video (MP4) 🖼️", variant="secondary")
+            rendered = gr.File(label="Rendered preview")
 
         with gr.Column(scale=1):
-            gr.Markdown("### Subtitle Style")
-            font = gr.Dropdown(["Default","Roboto","Arial","Open Sans","Lato","Montserrat"], value="Default", label="Font")
-            fsize = gr.Slider(14,72,value=36,step=1, label="Font size")
-            text_color = gr.ColorPicker(value="#FFFFFF", label="Text color")
+            gr.Markdown("#### Subtitle Style")
+            font = gr.Dropdown(["Default","Arial","Roboto","Open Sans","Lato","Montserrat"], value="Default", label="Font")
+            font_size = gr.Slider(14, 72, value=36, step=1, label="Font size")
+
+            text_color = gr.ColorPicker(value="#FFFFFF", label="Text color")         # <— now visible & used
             outline_color = gr.ColorPicker(value="#000000", label="Outline color")
-            outline_w = gr.Slider(0,6,value=2,step=1, label="Outline width (px)")
+            outline_w = gr.Slider(0, 6, value=2, step=1, label="Outline width (px)")
 
             gr.Markdown("#### Background")
-            boxed_bg = gr.Checkbox(value=True, label="Boxed background behind text")
+            boxed_bg = gr.Checkbox(value=False, label="Boxed background behind text")
             bg_color = gr.ColorPicker(value="#000000", label="Background color")
 
-            with gr.Accordion("Per-line editor", open=False):
-                gr.Markdown("Apply edits in the table soon (placeholder).")
-                gr.Checkbox(value=True, label="Apply edits & refresh")
+            gr.Markdown("#### Per-line editor")
+            apply_refresh = gr.Checkbox(value=True, label="Apply edits & refresh")
+            nudge_minus = gr.Button("◀ Nudge -0.10s")
+            nudge_plus = gr.Button("▶ Nudge +0.10s")
 
-    # Download buttons
-    srt_dl = gr.DownloadButton("Download SRT")
-    ass_dl = gr.DownloadButton("Download ASS")
-    vtt_dl = gr.DownloadButton("Download VTT")
-
-    # Render section
-    render_btn = gr.Button("Render subtitle video (MP4) 🖼️")
-    rendered = gr.File(label="Rendered preview")
-
-    # ------------------------
-    # State we need across actions
-    # ------------------------
-    srt_path_state = gr.State()
-    ass_path_state = gr.State()
-    vtt_path_state = gr.State()
-    duration_state = gr.State()
-
-    # ------------------------
-    # Wiring
-    # ------------------------
-
-    def _run_and_return(media_path, language_ui, words_per_chunk, layout,
-                        font, fsize, text_color, outline_color, outline_w,
-                        boxed_bg, bg_color, global_shift):
-        try:
-            chunks, table_data, prev_html, srt_path, ass_path, vtt_path, duration = run_pipeline(
-                media_path, language_ui, words_per_chunk, layout,
-                font, fsize, text_color, outline_color, outline_w, boxed_bg, bg_color, global_shift
-            )
-            return (prev_html, table_data,
-                    srt_path, ass_path, vtt_path,
-                    duration, srt_path, ass_path, vtt_path)
-        except Exception as e:
-            return (f"<div style='color:#ff6b6b'>Error: {gr.utils.sanitize_html(str(e))}</div>",
-                    gr.update(value=None), None, None, None, 0.0, None, None, None)
-
+    # --- wire actions ---
+    run_outputs = [prev_html, table, chunks_json, srt_dl, ass_dl, vtt_dl, input_media_state, duration_state, gr.JSON()]
     run.click(
-        _run_and_return,
-        inputs=[media, language, words_per_chunk, layout,
-                font, fsize, text_color, outline_color, outline_w,
-                boxed_bg, bg_color, global_shift],
-        outputs=[
-            preview, table,
-            srt_dl, ass_dl, vtt_dl,           # download buttons expect file paths
-            duration_state,                   # store duration
-            srt_path_state, ass_path_state, vtt_path_state  # keep paths for render
-        ]
+        run_pipeline,
+        inputs=[audio, language, words, layout, use_lyrics, lyrics_box, shift,
+                font, font_size, text_color, outline_color, outline_w, boxed_bg, bg_color],
+        outputs=run_outputs
     )
 
-    def _render(media_path, ass_path, layout, duration):
-        return render_video(media_path, ass_path, layout, duration or 0.0)
+    nudge_minus.click(lambda cj, ap: nudge(cj, -0.10, ap), inputs=[chunks_json, apply_refresh], outputs=[chunks_json])\
+               .then(refresh_build,
+                     inputs=[chunks_json, font, font_size, text_color, outline_color, outline_w, boxed_bg, bg_color],
+                     outputs=[prev_html, table, chunks_json, srt_dl, ass_dl, vtt_dl])
 
-    render_btn.click(
-        _render,
-        inputs=[media, ass_path_state, layout, duration_state],
-        outputs=rendered
-    )
+    nudge_plus.click(lambda cj, ap: nudge(cj, +0.10, ap), inputs=[chunks_json, apply_refresh], outputs=[chunks_json])\
+              .then(refresh_build,
+                    inputs=[chunks_json, font, font_size, text_color, outline_color, outline_w, boxed_bg, bg_color],
+                    outputs=[prev_html, table, chunks_json, srt_dl, ass_dl, vtt_dl])
+
+    render_btn.click(do_render, inputs=[render_btn, input_media_state, ass_dl], outputs=[rendered])
 
 if __name__ == "__main__":
     demo.launch()
