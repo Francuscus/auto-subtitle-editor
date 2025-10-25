@@ -16,7 +16,7 @@ LANG_MAP = {
     "auto": None, "auto-detect": None, "automatic": None,
     "spanish": "es", "es": "es",
     "hungarian": "hu", "hu": "hu",
-    # keep a few common extras in case users type them
+    # extras in case user types them
     "english": "en", "en": "en",
 }
 
@@ -46,12 +46,12 @@ def get_asr_model():
 
     use_cuda = torch.cuda.is_available()
     device = "cuda" if use_cuda else "cpu"
-    compute = "float16" if use_cuda else "int8"  # int8 on CPU to avoid the float16 error
+    compute = "float16" if use_cuda else "int8"  # int8 on CPU to avoid float16 error
 
     try:
         _asr_model = whisperx.load_model("small", device=device, compute_type=compute)
     except ValueError as e:
-        # Fallback if the host CPU lacks the needed int8 kernels
+        # Fallback if host CPU lacks required int8 kernels
         if "compute type" in str(e).lower():
             fallback = "int16" if device == "cpu" else "float32"
             _asr_model = whisperx.load_model("small", device=device, compute_type=fallback)
@@ -66,14 +66,14 @@ def get_asr_model():
 def transcribe(audio_path: str, language_code: Optional[str]) -> Tuple[List[dict], str]:
     """
     Returns (segments, full_text)
-    segments list items: {start, end, text}
+    segments: [{start: float, end: float, text: str}, ...]
     """
     model = get_asr_model()
-    # Important: do NOT pass unsupported kwargs (e.g., word_timestamps) — some builds error.
+    # Do NOT pass unsupported kwargs (e.g., word_timestamps) on some builds.
     result = model.transcribe(audio_path, language=language_code)
     segs = result.get("segments", [])
     text = " ".join(s.get("text", "").strip() for s in segs).strip()
-    # Normalize segment fields (guard against None)
+
     cleaned = []
     for s in segs:
         cleaned.append({
@@ -85,10 +85,7 @@ def transcribe(audio_path: str, language_code: Optional[str]) -> Tuple[List[dict
 
 
 def spread_lyrics_over_duration(lines: List[str], duration: float) -> List[dict]:
-    """
-    Evenly spread given lyric lines across [0, duration].
-    Returns segments [{start,end,text}, ...]
-    """
+    """Evenly spread lyric lines across [0, duration]."""
     n = max(1, len(lines))
     step = duration / n
     segs = []
@@ -101,16 +98,15 @@ def spread_lyrics_over_duration(lines: List[str], duration: float) -> List[dict]
 
 def retime_with_lyrics(original: List[dict], lyrics_text: str) -> List[dict]:
     """
-    Very lightweight retime: take user-provided lyric lines and
-    distribute them evenly across the total original timeline.
+    Lightweight retime: distribute pasted lyric lines evenly across
+    the original timeline length.
     """
     lines = [ln.strip() for ln in lyrics_text.splitlines() if ln.strip()]
     if not lines:
         return original
 
     if not original:
-        # No detected segments: assume a 60s clip for safety.
-        total = 60.0
+        total = 60.0  # assume 60s if nothing detected
     else:
         total = max(0.0, original[-1]["end"] - original[0]["start"])
 
@@ -147,8 +143,7 @@ def make_srt(segments: List[dict]) -> str:
 
 def make_ass(segments: List[dict], font_family: str, font_size: int,
              text_color: str, outline_color: str, outline_w: int) -> str:
-    # ASS colors are BGR in &HBBGGRR format; for simplicity we won't convert hex.
-    # We embed font/size, and simple outline settings in a single style.
+    # Minimal ASS with a single Default style. (We don’t convert HTML hex to ASS BGR here.)
     style = (
         "[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
@@ -198,7 +193,7 @@ def run_pipeline(
     else:
         segments_out = segments
 
-    # Live preview HTML (CSS inline for simplicity)
+    # Live preview HTML
     styled_html = f"""
 <div style="
   font-family:{'inherit' if font_family=='Default' else font_family}, sans-serif;
@@ -235,10 +230,9 @@ def download_file(contents: str, filename: str) -> str:
 # Gradio app
 # ==============================
 custom_css = """
-/* Make differences obvious (dark UI with purple accents) */
-:root { --radius-lg: 14px; }
+/* Dark UI with clear contrast */
 .gradio-container { max-width: 1280px !important; }
-.theme-dark body { background: #0f1220; }
+body { background: #0f1220; }
 #titlebar h1 { color: #FFFFFF !important; }
 .grey-note { color: #a7adc0; }
 .preview-card .label-wrap > label { color: #cdd3eb !important; }
@@ -269,8 +263,9 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
             segments_json = gr.JSON(label="Segments")
 
             with gr.Accordion("Export", open=True):
-                srt_box = gr.Code(label="SRT", language="plaintext", interactive=False)
-                ass_box = gr.Code(label="ASS", language="plaintext", interactive=False)
+                # Textboxes instead of Code, to avoid language issues; also editable.
+                srt_box = gr.Textbox(label="SRT", lines=10, show_copy_button=True)
+                ass_box = gr.Textbox(label="ASS", lines=10, show_copy_button=True)
                 with gr.Row():
                     srt_dl = gr.DownloadButton("Download SRT", file_name="subtitles.srt")
                     ass_dl = gr.DownloadButton("Download ASS", file_name="subtitles.ass")
@@ -303,11 +298,10 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
         outputs=[preview, segments_json, srt_box, ass_box]
     )
 
-    # Download handlers: take current text in SRT/ASS panes and write files
+    # Downloads: return a filepath to the button
     srt_dl.click(lambda s: download_file(s, "subtitles.srt"), inputs=[srt_box], outputs=srt_dl)
     ass_dl.click(lambda a: download_file(a, "subtitles.ass"), inputs=[ass_box], outputs=ass_dl)
 
 
 if __name__ == "__main__":
-    # IMPORTANT for Spaces: set share=True only if you want a public link locally.
     demo.launch()
