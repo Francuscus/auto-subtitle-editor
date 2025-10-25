@@ -1,20 +1,13 @@
-# Colorvideo Subs — v0.9.5
-# - Fix: replaced gr.escape_html with html.escape (Gradio 4 safe).
-# - Default text color = BLUE (#1E90FF).
-# - CPU-safe WhisperX; chunk-by-N-words timing.
-# - SRT/ASS/VTT export + MP4 render (ffmpeg).
-# - Boxed background toggle, outline, font size, layout presets.
-# - Simple per-line nudge editor.
+# Enhanced Colorvideo Subs with Timeline Editor
+# Version 1.0 - Language Learning Focus
 
 import os
 import re
 import json
-import math
-import shutil
 import tempfile
 import subprocess
-from typing import List, Tuple
-from html import escape as html_escape  # <-- fix
+from typing import List, Tuple, Dict
+from html import escape as html_escape
 
 import gradio as gr
 import torch
@@ -25,10 +18,11 @@ import whisperx
 
 LANG_MAP = {
     "auto": None, "auto-detect": None, "automatic": None,
-    "hungarian": "hu", "magyar": "hu",
-    "spanish": "es", "español": "es",
-    "english": "en",
+    "hungarian": "hu", "magyar": "hu", "hun": "hu",
+    "spanish": "es", "español": "es", "esp": "es",
+    "english": "en", "eng": "en",
 }
+
 
 def normalize_lang(s: str | None):
     if not s:
@@ -40,47 +34,35 @@ def normalize_lang(s: str | None):
     return m.group(1) if m else None
 
 
-def hex_to_rgb(hex_str: str) -> Tuple[int, int, int]:
-    """Accept #RRGGBB or RRGGBB and return (r,g,b)."""
-    if not hex_str:
-        return (255, 255, 255)
-    hx = hex_str.strip()
-    if hx.startswith("#"):
-        hx = hx[1:]
-    if len(hx) != 6:
-        return (255, 255, 255)
-    r = int(hx[0:2], 16)
-    g = int(hx[2:4], 16)
-    b = int(hx[4:6], 16)
-    return (r, g, b)
-
-
-def rgb_to_ass(rr: int, gg: int, bb: int, alpha_hex: str = "00") -> str:
-    """ASS color format &HAABBGGRR (AA alpha; then BGR)."""
-    return f"&H{alpha_hex}{bb:02X}{gg:02X}{rr:02X}"
-
-
-def hex_to_ass_bgr(hex_color: str, alpha_hex: str = "00") -> str:
-    r, g, b = hex_to_rgb(hex_color)
-    return rgb_to_ass(r, g, b, alpha_hex=alpha_hex)
-
-
-def sanitize_filename(name: str) -> str:
-    return re.sub(r"[^\w\-.]+", "_", name)
-
-
 def seconds_to_timestamp(t: float) -> str:
+    """Convert seconds to SRT timestamp format (HH:MM:SS,mmm)"""
     t = max(t, 0.0)
-    h = int(t // 3600); t -= h * 3600
-    m = int(t // 60);   t -= m * 60
+    h = int(t // 3600)
+    t -= h * 3600
+    m = int(t // 60)
+    t -= m * 60
     s = int(t)
     ms = int(round((t - s) * 1000))
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-# -------------------------- ASR model (lazy) --------------------------
+def timestamp_to_seconds(ts: str) -> float:
+    """Convert SRT timestamp to seconds"""
+    try:
+        time_part = ts.replace(',', '.')
+        parts = time_part.split(':')
+        if len(parts) == 3:
+            h, m, s = parts
+            return int(h) * 3600 + int(m) * 60 + float(s)
+    except:
+        pass
+    return 0.0
+
+
+# -------------------------- ASR Model (lazy loading) --------------------------
 
 _asr_model = None
+
 
 def get_asr_model():
     global _asr_model
@@ -90,432 +72,777 @@ def get_asr_model():
     use_cuda = torch.cuda.is_available()
     device = "cuda" if use_cuda else "cpu"
     compute = "float16" if use_cuda else "int8"
+    
+    print(f"Loading WhisperX model on {device} with {compute}...")
+    
     try:
         _asr_model = whisperx.load_model("small", device=device, compute_type=compute)
     except ValueError as e:
         if "compute type" in str(e).lower():
             fallback = "int16" if device == "cpu" else "float32"
+            print(f"Falling back to {fallback}")
             _asr_model = whisperx.load_model("small", device=device, compute_type=fallback)
         else:
             raise
+    
     return _asr_model
 
 
-# -------------------------- Transcription & chunking --------------------------
+# -------------------------- Transcription with Word Timestamps --------------------------
 
-def transcribe(audio_path: str, language_code: str | None):
+def transcribe_with_words(audio_path: str, language_code: str | None) -> Tuple[List[dict], float]:
+    """
+    Transcribe audio and return word-level timestamps.
+    Returns: (word_segments, total_duration)
+    word_segments format: [{"start": 0.0, "end": 1.5, "text": "Hello", "word": "Hello"}, ...]
+    """
     model = get_asr_model()
-    # FasterWhisperPipeline here does not take word_timestamps
+    
+    # Transcribe
+    print("Transcribing audio...")
     result = model.transcribe(audio_path, language=language_code)
     segments = result["segments"]
-    full_text = " ".join(seg["text"].strip() for seg in segments)
+    detected_language = result.get("language", language_code or "en")
+    
+    # Get duration
     duration = 0.0
     if segments:
         duration = max(duration, float(segments[-1]["end"]))
-    return segments, full_text, duration
-
-
-def split_segments_by_n_words(segments: List[dict], words_per_chunk: int) -> List[dict]:
-    if words_per_chunk <= 0:
-        words_per_chunk = 5
-
-    out = []
+    
+    # Extract words with timestamps
+    word_segments = []
     for seg in segments:
-        st = float(seg["start"])
-        en = float(seg["end"])
-        raw = seg["text"].strip()
-        if not raw:
-            continue
-
-        words = re.findall(r"\S+", raw)
-        if not words:
-            continue
-
-        total = len(words)
-        total_dur = max(en - st, 0.01)
-        per = total_dur / total
-
-        idx = 0
-        cur_start = st
-        while idx < total:
-            chunk_words = words[idx:idx + words_per_chunk]
-            chunk_text = " ".join(chunk_words)
-            chunk_dur = per * len(chunk_words)
-            chunk_end = cur_start + chunk_dur
-
-            out.append({
-                "start": round(cur_start, 3),
-                "end": round(chunk_end, 3),
-                "text": chunk_text
-            })
-
-            cur_start = chunk_end
-            idx += words_per_chunk
-
-    out.sort(key=lambda d: (d["start"], d["end"]))
-    return out
+        # WhisperX might have word-level timestamps in some cases
+        if "words" in seg and seg["words"]:
+            for w in seg["words"]:
+                word_segments.append({
+                    "start": float(w.get("start", seg["start"])),
+                    "end": float(w.get("end", seg["end"])),
+                    "text": w.get("word", w.get("text", "")).strip(),
+                    "word": w.get("word", w.get("text", "")).strip()
+                })
+        else:
+            # Fallback: split segment into words with estimated timing
+            text = seg["text"].strip()
+            words = text.split()
+            if words:
+                seg_start = float(seg["start"])
+                seg_end = float(seg["end"])
+                seg_dur = seg_end - seg_start
+                word_dur = seg_dur / len(words)
+                
+                for i, word in enumerate(words):
+                    w_start = seg_start + (i * word_dur)
+                    w_end = w_start + word_dur
+                    word_segments.append({
+                        "start": round(w_start, 3),
+                        "end": round(w_end, 3),
+                        "text": word,
+                        "word": word
+                    })
+    
+    print(f"Transcribed {len(word_segments)} words in {detected_language}")
+    return word_segments, duration
 
 
-# -------------------------- Exporters --------------------------
+# -------------------------- Subtitle Grouping --------------------------
 
-def to_srt(chunks: List[dict]) -> str:
+def group_words_into_subtitles(word_segments: List[dict], words_per_line: int = 5) -> List[dict]:
+    """
+    Group words into subtitle lines.
+    Returns: [{"start": 0.0, "end": 2.5, "text": "Hello world", "words": [...], "colors": []}, ...]
+    """
+    if not word_segments:
+        return []
+    
+    subtitles = []
+    i = 0
+    
+    while i < len(word_segments):
+        # Take next N words
+        chunk = word_segments[i:i + words_per_line]
+        if not chunk:
+            break
+        
+        sub_start = chunk[0]["start"]
+        sub_end = chunk[-1]["end"]
+        sub_text = " ".join(w["text"] for w in chunk)
+        
+        # Initialize colors (default: white for all words)
+        colors = ["#FFFFFF"] * len(chunk)
+        
+        subtitles.append({
+            "start": round(sub_start, 3),
+            "end": round(sub_end, 3),
+            "text": sub_text,
+            "words": chunk,
+            "colors": colors  # One color per word
+        })
+        
+        i += words_per_line
+    
+    return subtitles
+
+
+# -------------------------- Export Functions --------------------------
+
+def export_to_srt(subtitles: List[dict]) -> str:
+    """Export subtitles to SRT format"""
     lines = []
-    for i, c in enumerate(chunks, 1):
-        start = seconds_to_timestamp(c["start"])
-        end = seconds_to_timestamp(c["end"])
-        text = c["text"].strip()
+    for i, sub in enumerate(subtitles, 1):
+        start = seconds_to_timestamp(sub["start"])
+        end = seconds_to_timestamp(sub["end"])
+        text = sub["text"]
         lines.append(f"{i}\n{start} --> {end}\n{text}\n")
-    return "\n".join(lines).strip() + "\n"
+    return "\n".join(lines)
 
 
-def to_vtt(chunks: List[dict]) -> str:
-    lines = ["WEBVTT\n"]
-    for c in chunks:
-        s = seconds_to_timestamp(c["start"]).replace(",", ".")
-        e = seconds_to_timestamp(c["end"]).replace(",", ".")
-        lines.append(f"{s} --> {e}\n{c['text'].strip()}\n")
-    return "\n".join(lines).strip() + "\n"
+def export_to_ass_with_colors(subtitles: List[dict], video_w: int = 1280, video_h: int = 720,
+                               font_size: int = 36, font_name: str = "Arial") -> str:
+    """
+    Export to ASS format with word-level colors.
+    Uses inline color tags for each word.
+    """
+    
+    # ASS Header
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {video_w}
+PlayResY: {video_h}
+ScaledBorderAndShadow: yes
 
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,{font_name},{font_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,30,30,30,1
 
-def to_ass(chunks: List[dict],
-           font_family: str,
-           font_size: int,
-           text_hex: str,
-           outline_hex: str,
-           outline_w: int,
-           boxed_bg: bool,
-           bg_hex: str,
-           video_w: int,
-           video_h: int) -> str:
-
-    text_col = hex_to_ass_bgr(text_hex or "#1E90FF", alpha_hex="00")
-    outline_col = hex_to_ass_bgr(outline_hex or "#000000", alpha_hex="00")
-
-    if boxed_bg:
-        back_col = hex_to_ass_bgr(bg_hex or "#0B0E12", alpha_hex="00")  # opaque box
-        border_style = 3
-    else:
-        back_col = hex_to_ass_bgr("#000000", alpha_hex="FF")  # fully transparent
-        border_style = 1
-
-    margin_l = margin_r = 30
-    margin_v = 30
-    align = 2  # bottom-center
-
-    header = (
-f"[Script Info]\n"
-f"ScriptType: v4.00+\n"
-f"PlayResX: {video_w}\n"
-f"PlayResY: {video_h}\n"
-f"ScaledBorderAndShadow: yes\n"
-f"\n"
-f"[V4+ Styles]\n"
-f"Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
-f"Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, "
-f"Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-f"Style: Default,{font_family},{font_size},{text_col},&H00FFFFFF,{outline_col},{back_col},"
-f"0,0,0,0,100,100,0,0,{border_style},{max(outline_w, 0)},{max(outline_w-1, 0)},"
-f"{align},{margin_l},{margin_r},{margin_v},1\n"
-f"\n"
-f"[Events]\n"
-f"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-    )
-
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    
     events = []
-    for c in chunks:
-        s = seconds_to_timestamp(c["start"]).replace(",", ".")
-        e = seconds_to_timestamp(c["end"]).replace(",", ".")
-        txt = (c["text"] or "").replace("\n", "\\N")
-        events.append(f"Dialogue: 0,{s},{e},Default,,0,0,0,,{txt}")
-
+    for sub in subtitles:
+        start = seconds_to_timestamp(sub["start"]).replace(",", ".")
+        end = seconds_to_timestamp(sub["end"]).replace(",", ".")
+        
+        # Build text with color tags
+        text_parts = []
+        words = sub.get("words", [])
+        colors = sub.get("colors", [])
+        
+        for i, word_info in enumerate(words):
+            word_text = word_info["text"]
+            color = colors[i] if i < len(colors) else "#FFFFFF"
+            
+            # Convert hex to ASS color format (&HAABBGGRR)
+            if color.startswith("#"):
+                color = color[1:]
+            
+            # Hex to RGB
+            r = int(color[0:2], 16) if len(color) >= 2 else 255
+            g = int(color[2:4], 16) if len(color) >= 4 else 255
+            b = int(color[4:6], 16) if len(color) >= 6 else 255
+            
+            # ASS color format (BGR)
+            ass_color = f"&H00{b:02X}{g:02X}{r:02X}"
+            
+            text_parts.append(f"{{\\c{ass_color}}}{word_text}")
+        
+        colored_text = " ".join(text_parts)
+        events.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{colored_text}")
+    
     return header + "\n".join(events) + "\n"
 
 
-def write_text_file(text: str, suffix: str) -> str:
-    fd, path = tempfile.mkstemp(suffix=suffix)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text)
-    return path
+def save_file(content: str, extension: str) -> str:
+    """Save content to a temporary file and return the path"""
+    temp_dir = tempfile.mkdtemp()
+    file_path = os.path.join(temp_dir, f"subtitles{extension}")
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return file_path
 
 
-# -------------------------- Build preview + files --------------------------
+# -------------------------- Timeline HTML Component --------------------------
 
-def build_from_chunks(
-    chunks: List[dict],
-    font_family: str,
-    font_size: int,
-    text_color: str,
-    outline_color: str,
-    outline_w: int,
-    boxed_bg: bool,
-    bg_color: str,
-    layout_preset: str
-):
-    if layout_preset.startswith("9:16"):
-        vw, vh = 1080, 1920
-    else:
-        vw, vh = 1280, 720
-
-    style_html = f"""
-<style>
-.preview-wrap {{
-  width: 100%;
-  background: #0B0E12;
-  border-radius: 10px;
-  padding: 12px;
-  color: #e6e6e6;
-}}
-.bubble {{
-  display:inline-block;
-  font-family: {'inherit' if font_family=='Default' else font_family}, sans-serif;
-  font-size: {int(font_size)}px;
-  line-height: 1.35;
-  color: {text_color or '#1E90FF'};
-  text-shadow:
-    -{outline_w}px 0 {outline_color or '#000000'},
-     {outline_w}px 0 {outline_color or '#000000'},
-     0 -{outline_w}px {outline_color or '#000000'},
-     0  {outline_w}px {outline_color or '#000000'};
-  {"background: " + (bg_color or '#0B0E12') + "; padding: 4px 8px; border-radius: 6px;" if boxed_bg else ""}
-}}
-.row {{ margin: 8px 0; }}
-.time {{ opacity: .5; font-size: 12px }}
-</style>
+def create_timeline_html(subtitles: List[dict], audio_path: str) -> str:
+    """
+    Create an interactive timeline with waveform and subtitle editor.
+    """
+    
+    # Convert subtitles to JSON for JavaScript
+    subs_json = json.dumps(subtitles, ensure_ascii=False)
+    
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #fff;
+        }}
+        
+        #timeline-container {{
+            background: #2a2a2a;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }}
+        
+        #waveform {{
+            width: 100%;
+            height: 120px;
+            background: #1a1a1a;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }}
+        
+        #controls {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+        }}
+        
+        button {{
+            background: #4a7cff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }}
+        
+        button:hover {{
+            background: #3a6cef;
+        }}
+        
+        #current-time {{
+            font-size: 18px;
+            font-weight: bold;
+            color: #4a7cff;
+        }}
+        
+        #subtitle-list {{
+            max-height: 400px;
+            overflow-y: auto;
+            background: #1a1a1a;
+            border-radius: 4px;
+            padding: 10px;
+        }}
+        
+        .subtitle-item {{
+            background: #2a2a2a;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            border-left: 4px solid #4a7cff;
+            cursor: pointer;
+        }}
+        
+        .subtitle-item:hover {{
+            background: #3a3a3a;
+        }}
+        
+        .subtitle-item.active {{
+            border-left-color: #ff4a4a;
+            background: #3a2a2a;
+        }}
+        
+        .subtitle-time {{
+            color: #888;
+            font-size: 12px;
+            margin-bottom: 5px;
+        }}
+        
+        .subtitle-text {{
+            font-size: 16px;
+            margin-bottom: 10px;
+        }}
+        
+        .word-colorizer {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }}
+        
+        .word-chip {{
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 5px 10px;
+            background: #1a1a1a;
+            border-radius: 4px;
+            cursor: pointer;
+        }}
+        
+        .word-chip:hover {{
+            background: #0a0a0a;
+        }}
+        
+        .color-dot {{
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            border: 2px solid #fff;
+        }}
+        
+        .color-picker-popup {{
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            z-index: 1000;
+        }}
+        
+        .color-picker-popup.active {{
+            display: block;
+        }}
+        
+        .overlay {{
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            z-index: 999;
+        }}
+        
+        .overlay.active {{
+            display: block;
+        }}
+        
+        .color-grid {{
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 10px;
+            margin: 20px 0;
+        }}
+        
+        .color-option {{
+            width: 40px;
+            height: 40px;
+            border-radius: 4px;
+            cursor: pointer;
+            border: 2px solid transparent;
+        }}
+        
+        .color-option:hover {{
+            border-color: #fff;
+        }}
+        
+        .preset-colors {{
+            margin: 20px 0;
+        }}
+        
+        .preset-btn {{
+            margin: 5px;
+            padding: 8px 15px;
+            background: #3a3a3a;
+        }}
+    </style>
+</head>
+<body>
+    <div id="timeline-container">
+        <h3>Audio Timeline</h3>
+        <div id="waveform"></div>
+        <div id="controls">
+            <button id="play-pause">▶ Play</button>
+            <button id="stop">⏹ Stop</button>
+            <span id="current-time">00:00</span>
+            <span>/</span>
+            <span id="total-time">00:00</span>
+        </div>
+    </div>
+    
+    <div id="subtitle-list"></div>
+    
+    <div class="overlay" id="overlay"></div>
+    <div class="color-picker-popup" id="colorPicker">
+        <h3>Choose Word Color</h3>
+        <p id="selected-word-display"></p>
+        
+        <div class="preset-colors">
+            <h4>Language Learning Presets:</h4>
+            <button class="preset-btn" data-color="#FF6B6B">❤️ Feminine</button>
+            <button class="preset-btn" data-color="#4ECDC4">💙 Masculine</button>
+            <button class="preset-btn" data-color="#FFD93D">⭐ Verb</button>
+            <button class="preset-btn" data-color="#95E1D3">🌿 Adjective</button>
+            <button class="preset-btn" data-color="#F38181">🔴 Important</button>
+            <button class="preset-btn" data-color="#AA96DA">💜 Conjugation</button>
+        </div>
+        
+        <div class="color-grid" id="colorGrid"></div>
+        
+        <div>
+            <input type="color" id="customColor" value="#FFFFFF">
+            <button id="applyCustom">Apply Custom Color</button>
+        </div>
+        
+        <button id="closeColorPicker">Close</button>
+    </div>
+    
+    <script>
+        // Subtitle data from Python
+        let subtitles = {subs_json};
+        let currentSubtitleIndex = -1;
+        let currentWordIndex = -1;
+        let isPlaying = false;
+        let currentTime = 0;
+        let duration = 0;
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {{
+            renderSubtitles();
+            initializeColorPicker();
+            updateTimeDisplay();
+            
+            // Note: Actual audio playback would require proper audio element
+            // This is a simplified version for demonstration
+            console.log('Timeline initialized with ' + subtitles.length + ' subtitles');
+        }});
+        
+        function renderSubtitles() {{
+            const container = document.getElementById('subtitle-list');
+            container.innerHTML = '';
+            
+            subtitles.forEach((sub, index) => {{
+                const item = document.createElement('div');
+                item.className = 'subtitle-item';
+                item.dataset.index = index;
+                
+                const timeDiv = document.createElement('div');
+                timeDiv.className = 'subtitle-time';
+                timeDiv.textContent = formatTime(sub.start) + ' → ' + formatTime(sub.end);
+                
+                const textDiv = document.createElement('div');
+                textDiv.className = 'subtitle-text';
+                textDiv.textContent = sub.text;
+                
+                const wordDiv = document.createElement('div');
+                wordDiv.className = 'word-colorizer';
+                
+                // Render words with colors
+                if (sub.words && sub.words.length > 0) {{
+                    sub.words.forEach((word, wordIndex) => {{
+                        const wordChip = document.createElement('div');
+                        wordChip.className = 'word-chip';
+                        wordChip.dataset.subIndex = index;
+                        wordChip.dataset.wordIndex = wordIndex;
+                        
+                        const colorDot = document.createElement('div');
+                        colorDot.className = 'color-dot';
+                        colorDot.style.backgroundColor = sub.colors[wordIndex] || '#FFFFFF';
+                        
+                        const wordText = document.createElement('span');
+                        wordText.textContent = word.text;
+                        
+                        wordChip.appendChild(colorDot);
+                        wordChip.appendChild(wordText);
+                        
+                        wordChip.addEventListener('click', (e) => {{
+                            e.stopPropagation();
+                            openColorPicker(index, wordIndex, word.text);
+                        }});
+                        
+                        wordDiv.appendChild(wordChip);
+                    }});
+                }}
+                
+                item.appendChild(timeDiv);
+                item.appendChild(textDiv);
+                item.appendChild(wordDiv);
+                
+                item.addEventListener('click', () => {{
+                    seekToSubtitle(index);
+                }});
+                
+                container.appendChild(item);
+            }});
+        }}
+        
+        function formatTime(seconds) {{
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return mins.toString().padStart(2, '0') + ':' + secs.toString().padStart(2, '0');
+        }}
+        
+        function seekToSubtitle(index) {{
+            currentSubtitleIndex = index;
+            currentTime = subtitles[index].start;
+            updateTimeDisplay();
+            highlightCurrentSubtitle();
+        }}
+        
+        function highlightCurrentSubtitle() {{
+            document.querySelectorAll('.subtitle-item').forEach((item, index) => {{
+                if (index === currentSubtitleIndex) {{
+                    item.classList.add('active');
+                    item.scrollIntoView({{ behavior: 'smooth', block: 'nearest' }});
+                }} else {{
+                    item.classList.remove('active');
+                }}
+            }});
+        }}
+        
+        function updateTimeDisplay() {{
+            document.getElementById('current-time').textContent = formatTime(currentTime);
+        }}
+        
+        function initializeColorPicker() {{
+            const colorGrid = document.getElementById('colorGrid');
+            const commonColors = [
+                '#FF6B6B', '#4ECDC4', '#FFD93D', '#95E1D3', '#F38181', '#AA96DA',
+                '#FFA07A', '#20B2AA', '#FFB6C1', '#87CEEB', '#DDA0DD', '#F0E68C',
+                '#FFFFFF', '#CCCCCC', '#999999', '#666666', '#333333', '#000000'
+            ];
+            
+            commonColors.forEach(color => {{
+                const option = document.createElement('div');
+                option.className = 'color-option';
+                option.style.backgroundColor = color;
+                option.dataset.color = color;
+                option.addEventListener('click', () => applyColor(color));
+                colorGrid.appendChild(option);
+            }});
+            
+            // Preset buttons
+            document.querySelectorAll('.preset-btn').forEach(btn => {{
+                btn.addEventListener('click', () => {{
+                    applyColor(btn.dataset.color);
+                }});
+            }});
+            
+            document.getElementById('applyCustom').addEventListener('click', () => {{
+                const color = document.getElementById('customColor').value;
+                applyColor(color);
+            }});
+            
+            document.getElementById('closeColorPicker').addEventListener('click', closeColorPicker);
+            document.getElementById('overlay').addEventListener('click', closeColorPicker);
+        }}
+        
+        function openColorPicker(subIndex, wordIndex, wordText) {{
+            currentSubtitleIndex = subIndex;
+            currentWordIndex = wordIndex;
+            
+            document.getElementById('selected-word-display').textContent = 
+                'Coloring: "' + wordText + '"';
+            
+            document.getElementById('overlay').classList.add('active');
+            document.getElementById('colorPicker').classList.add('active');
+        }}
+        
+        function closeColorPicker() {{
+            document.getElementById('overlay').classList.remove('active');
+            document.getElementById('colorPicker').classList.remove('active');
+        }}
+        
+        function applyColor(color) {{
+            if (currentSubtitleIndex >= 0 && currentWordIndex >= 0) {{
+                subtitles[currentSubtitleIndex].colors[currentWordIndex] = color;
+                renderSubtitles();
+                
+                // Send update back to Python (via Gradio custom event)
+                window.parent.postMessage({{
+                    type: 'subtitle_update',
+                    data: subtitles
+                }}, '*');
+            }}
+            closeColorPicker();
+        }}
+        
+        // Playback controls (simplified - would need actual audio element)
+        document.getElementById('play-pause').addEventListener('click', () => {{
+            // Placeholder for audio playback
+            alert('Audio playback would be integrated here. For now, click on subtitles to jump to their time.');
+        }});
+        
+        document.getElementById('stop').addEventListener('click', () => {{
+            currentTime = 0;
+            currentSubtitleIndex = -1;
+            updateTimeDisplay();
+            highlightCurrentSubtitle();
+        }});
+    </script>
+</body>
+</html>
 """
-    lines = []
-    for c in chunks:
-        safe_txt = html_escape(c.get("text", ""))
-        lines.append(
-            f"<div class='row'><span class='time'>[{c['start']:.2f}–{c['end']:.2f}]</span> "
-            f"<span class='bubble'>{safe_txt}</span></div>"
-        )
-    preview_html = style_html + f"<div class='preview-wrap'>{''.join(lines)}</div>"
-
-    srt_text = to_srt(chunks)
-    vtt_text = to_vtt(chunks)
-    ass_text = to_ass(
-        chunks,
-        font_family=font_family if font_family != "Default" else "Arial",
-        font_size=font_size,
-        text_hex=text_color or "#1E90FF",
-        outline_hex=outline_color or "#000000",
-        outline_w=outline_w,
-        boxed_bg=boxed_bg,
-        bg_hex=bg_color or "#0B0E12",
-        video_w=vw, video_h=vh
-    )
-    srt_path = write_text_file(srt_text, ".srt")
-    vtt_path = write_text_file(vtt_text, ".vtt")
-    ass_path = write_text_file(ass_text, ".ass")
-
-    px = json.dumps({"w": vw, "h": vh})
-    py = json.dumps({"n": len(chunks)})
-
-    return preview_html, px, py, srt_path, ass_path, vtt_path
+    
+    return html
 
 
-# -------------------------- Render MP4 --------------------------
+# -------------------------- Main Gradio Interface --------------------------
 
-def render_with_subs(
-    media_path: str | None,
-    ass_path: str,
-    layout_preset: str,
-    out_basename: str = "subtitle_video"
-) -> str:
-    if layout_preset.startswith("9:16"):
-        vw, vh = 1080, 1920
-    else:
-        vw, vh = 1280, 720
-
-    out_dir = tempfile.mkdtemp()
-    out_path = os.path.join(out_dir, sanitize_filename(out_basename) + ".mp4")
-
-    if media_path and media_path.lower().endswith((".mp4", ".mov", ".mkv", ".webm")):
-        cmd = [
-            "ffmpeg", "-y", "-i", media_path,
-            "-vf", f"ass={ass_path}",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "copy",
-            out_path
-        ]
-    else:
-        duration = 60
-        if media_path:
-            try:
-                probe = subprocess.run(
-                    ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                     "-of", "default=nw=1:nk=1", media_path],
-                    capture_output=True, text=True, check=True
+def create_app():
+    with gr.Blocks(theme=gr.themes.Soft(), title="Language Learning Subtitle Editor") as app:
+        gr.Markdown("""
+        # 🎓 Language Learning Subtitle Editor
+        ### Perfect for Spanish & Hungarian lessons!
+        
+        **Features:**
+        - 🎯 Word-level timing & colorization
+        - 📝 Interactive timeline editor
+        - 🎨 Color word endings for grammar learning
+        - 🌍 Optimized for Spanish & Hungarian
+        """)
+        
+        # State variables
+        subtitles_state = gr.State([])
+        audio_path_state = gr.State("")
+        
+        with gr.Row():
+            with gr.Column(scale=1):
+                gr.Markdown("### 1️⃣ Upload & Transcribe")
+                
+                audio_input = gr.Audio(
+                    label="Upload Audio/Video",
+                    type="filepath"
                 )
-                duration = max(1, int(float(probe.stdout.strip())))
-            except Exception:
-                pass
-
-        if media_path and media_path.lower().endswith((".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg")):
-            cmd = [
-                "ffmpeg", "-y",
-                "-f", "lavfi", "-i", f"color=c=black:s={vw}x{vh}:d={duration}",
-                "-i", media_path,
-                "-shortest",
-                "-vf", f"ass={ass_path}",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k",
-                out_path
-            ]
-        else:
-            cmd = [
-                "ffmpeg", "-y",
-                "-f", "lavfi", "-i", f"color=c=black:s={vw}x{vh}:d={duration}",
-                "-vf", f"ass={ass_path}",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                out_path
-            ]
-
-    subprocess.run(cmd, check=True)
-    return out_path
-
-
-# -------------------------- Gradio App --------------------------
-
-FONT_CHOICES = [
-    "Default", "Arial", "Roboto", "Open Sans", "Lato", "Noto Sans", "Montserrat",
-]
-LANG_CHOICES = [
-    ("Auto-detect", "auto"),
-    ("Hungarian (hu)", "hu"),
-    ("Spanish (es)", "es"),
-    ("English (en)", "en"),
-]
-LAYOUT_CHOICES = ["16:9 (YouTube)", "9:16 (TikTok/Reels)"]
-
-with gr.Blocks(theme=gr.themes.Soft(), css="""
-.gradio-container { max-width: 1280px !important; }
-.dark .gradio-container { background: #0A0D12; }
-""") as demo:
-    gr.Markdown("### 🎨 Colorvideo Subs — v0.9.5")
-
-    srt_state = gr.State("")
-    ass_state = gr.State("")
-    vtt_state = gr.State("")
-    last_media_state = gr.State("")
-    preview_ass_state = gr.State("")
-
-    with gr.Row():
-        with gr.Column(scale=3):
-            media = gr.Audio(label="Audio / Video (mp3, wav, mp4…)", type="filepath")
-            language = gr.Dropdown(LANG_CHOICES, value="auto", label="Language")
-
-            words_per = gr.Slider(1, 8, value=5, step=1,
-                                  label="Words per chunk (when not using lyrics)")
-            layout = gr.Dropdown(LAYOUT_CHOICES, value="16:9 (YouTube)", label="Layout preset")
-
-            lyrics_box = gr.Textbox(label="Lyrics mode (optional)",
-                                    placeholder="Paste lyrics here (one line per lyric line)", lines=4)
-
-            shift = gr.Slider(-5, 5, value=0, step=0.1, label="Global shift (seconds)")
-
-            run_btn = gr.Button("Run", variant="primary")
-
-            preview = gr.HTML(label="Preview")
-            table = gr.JSON(label="Segments (JSON)")
-
-            srt_dl = gr.File(label="Download SRT")
-            ass_dl = gr.File(label="Download ASS")
-            vtt_dl = gr.File(label="Download VTT")
-
-            render_btn = gr.Button("Render subtitle video (MP4) 🖼️")
-            rendered = gr.File(label="Rendered preview")
-
-        with gr.Column(scale=1):
-            gr.Markdown("#### Subtitle Style")
-            font_family = gr.Dropdown(FONT_CHOICES, value="Default", label="Font")
-            font_size   = gr.Slider(14, 72, value=36, step=1, label="Font size")
-            text_color  = gr.ColorPicker(value="#1E90FF", label="Text color")  # BLUE
-            outline_color = gr.ColorPicker(value="#000000", label="Outline color")
-            outline_w   = gr.Slider(0, 6, value=2, step=1, label="Outline width (px)")
-
-            gr.Markdown("#### Background")
-            boxed_bg = gr.Checkbox(value=True, label="Boxed background behind text")
-            bg_color = gr.ColorPicker(value="#0B0E12", label="Background color")
-
-            gr.Markdown("#### Per-line editor")
-            apply_refresh = gr.Checkbox(value=True, label="Apply edits & refresh")
-            nudge_minus = gr.Button("◂ Nudge −0.10s")
-            nudge_plus  = gr.Button("▸ Nudge +0.10s")
-
-    # ---------------- Callbacks ----------------
-
-    def run_pipeline(
-        media_path, lang_ui, words, layout_preset,
-        lyrics_text, shift_sec,
-        font_family, font_size, text_color, outline_color, outline_w,
-        boxed_bg, bg_color
-    ):
-        if not media_path:
-            raise gr.Error("Please upload an audio or video file.")
-
-        lang_code = normalize_lang(lang_ui)
-        segs, _, _ = transcribe(media_path, lang_code)
-        chunks = split_segments_by_n_words(segs, int(words))
-
-        if abs(float(shift_sec)) > 1e-6:
-            for c in chunks:
-                c["start"] = round(c["start"] + float(shift_sec), 3)
-                c["end"]   = round(c["end"] + float(shift_sec), 3)
-
-        prev_html, px, py, srt_path, ass_path, vtt_path = build_from_chunks(
-            chunks=chunks,
-            font_family=font_family,
-            font_size=int(font_size),
-            text_color=text_color,
-            outline_color=outline_color,
-            outline_w=int(outline_w),
-            boxed_bg=bool(boxed_bg),
-            bg_color=bg_color,
-            layout_preset=layout_preset
+                
+                language_dropdown = gr.Dropdown(
+                    choices=[
+                        ("Auto-detect", "auto"),
+                        ("Spanish (Español)", "es"),
+                        ("Hungarian (Magyar)", "hu"),
+                        ("English", "en")
+                    ],
+                    value="auto",
+                    label="Language"
+                )
+                
+                words_per_line = gr.Slider(
+                    minimum=2,
+                    maximum=10,
+                    value=5,
+                    step=1,
+                    label="Words per subtitle line"
+                )
+                
+                transcribe_btn = gr.Button("🎤 Transcribe", variant="primary", size="lg")
+                
+                status_text = gr.Textbox(
+                    label="Status",
+                    value="Ready to transcribe...",
+                    interactive=False
+                )
+        
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 2️⃣ Edit Timeline & Colors")
+                
+                timeline_html = gr.HTML(
+                    value="<p style='text-align:center; color:#888;'>Timeline will appear here after transcription...</p>"
+                )
+                
+                gr.Markdown("""
+                **How to use:**
+                - Click on any subtitle to jump to that time
+                - Click on individual words to change their color
+                - Use preset colors for grammar categories (verbs, endings, etc.)
+                """)
+        
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 3️⃣ Export")
+                
+                with gr.Row():
+                    export_srt_btn = gr.Button("📄 Export SRT")
+                    export_ass_btn = gr.Button("🎨 Export ASS (with colors)")
+                
+                srt_file = gr.File(label="SRT File")
+                ass_file = gr.File(label="ASS File (colored)")
+                
+                subtitle_json = gr.JSON(label="Subtitle Data (for debugging)", visible=False)
+        
+        # Event handlers
+        
+        def do_transcribe(audio_path, language, words_per):
+            if not audio_path:
+                return "⚠️ Please upload an audio file first!", [], "", "<p>No audio uploaded</p>"
+            
+            try:
+                yield "🔄 Loading AI model...", [], audio_path, "<p>Loading...</p>"
+                
+                # Normalize language
+                lang_code = normalize_lang(language)
+                
+                yield "🎤 Transcribing audio...", [], audio_path, "<p>Transcribing...</p>"
+                
+                # Transcribe with word timestamps
+                word_segments, duration = transcribe_with_words(audio_path, lang_code)
+                
+                yield f"✨ Grouping {len(word_segments)} words...", [], audio_path, "<p>Processing...</p>"
+                
+                # Group into subtitle lines
+                subtitles = group_words_into_subtitles(word_segments, int(words_per))
+                
+                # Create timeline HTML
+                timeline = create_timeline_html(subtitles, audio_path)
+                
+                success_msg = f"✅ Done! {len(subtitles)} subtitle lines created."
+                
+                return success_msg, subtitles, audio_path, timeline
+                
+            except Exception as e:
+                error_msg = f"❌ Error: {str(e)}"
+                return error_msg, [], "", f"<p style='color:red;'>{error_msg}</p>"
+        
+        def do_export_srt(subtitles):
+            if not subtitles:
+                gr.Warning("No subtitles to export. Please transcribe first.")
+                return None
+            
+            srt_content = export_to_srt(subtitles)
+            srt_path = save_file(srt_content, ".srt")
+            return srt_path
+        
+        def do_export_ass(subtitles):
+            if not subtitles:
+                gr.Warning("No subtitles to export. Please transcribe first.")
+                return None
+            
+            ass_content = export_to_ass_with_colors(subtitles)
+            ass_path = save_file(ass_content, ".ass")
+            return ass_path
+        
+        # Connect events
+        transcribe_btn.click(
+            fn=do_transcribe,
+            inputs=[audio_input, language_dropdown, words_per_line],
+            outputs=[status_text, subtitles_state, audio_path_state, timeline_html]
         )
-        return (chunks, prev_html, srt_path, ass_path, vtt_path, media_path, ass_path)
+        
+        export_srt_btn.click(
+            fn=do_export_srt,
+            inputs=[subtitles_state],
+            outputs=[srt_file]
+        )
+        
+        export_ass_btn.click(
+            fn=do_export_ass,
+            inputs=[subtitles_state],
+            outputs=[ass_file]
+        )
+    
+    return app
 
-    run_btn.click(
-        run_pipeline,
-        inputs=[
-            media, language, words_per, layout, lyrics_box, shift,
-            font_family, font_size, text_color, outline_color, outline_w,
-            boxed_bg, bg_color
-        ],
-        outputs=[table, preview, srt_dl, ass_dl, vtt_dl, last_media_state, preview_ass_state]
-    )
 
-    def nudge_json(json_data, delta, do_apply):
-        if not do_apply or not json_data:
-            return json_data
-        try:
-            new = []
-            for c in json_data:
-                c2 = dict(c)
-                c2["start"] = round(c2["start"] + delta, 3)
-                c2["end"]   = round(c2["end"] + delta, 3)
-                new.append(c2)
-            return new
-        except Exception:
-            return json_data
-
-    nudge_minus.click(lambda js: nudge_json(js, -0.10, True), inputs=[table], outputs=[table])
-    nudge_plus.click(lambda js: nudge_json(js, +0.10, True), inputs=[table], outputs=[table])
-
-    def do_render(media_path, ass_path, layout_preset):
-        if not ass_path:
-            raise gr.Error("No ASS file available. Click Run first.")
-        try:
-            out_mp4 = render_with_subs(media_path, ass_path, layout_preset, out_basename="rendered_subs")
-            return out_mp4
-        except subprocess.CalledProcessError as e:
-            raise gr.Error(f"ffmpeg error: {e}")
-
-    render_btn.click(
-        do_render,
-        inputs=[last_media_state, preview_ass_state, layout],
-        outputs=[rendered]
-    )
+# -------------------------- Launch --------------------------
 
 if __name__ == "__main__":
-    demo.launch()
+    app = create_app()
+    app.launch(share=False)
