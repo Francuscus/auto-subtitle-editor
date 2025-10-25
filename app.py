@@ -1,5 +1,5 @@
-# app.py  —  Five-Word Subtitle Chunker + Exports
-# Version: v0.9.3 (2025-10-25)
+# app.py — Five-Word Subtitle Chunker + Lyrics Timecoding + Exports
+# Version: v1.0.0 (2025-10-25)
 
 import os
 import re
@@ -11,11 +11,9 @@ from typing import List, Dict, Tuple, Optional
 
 import gradio as gr
 import torch
-
-# ---------- ASR (whisperx) ----------
 import whisperx
 
-# Map friendly names → whisper language codes
+# ---------- Language helpers ----------
 LANG_MAP = {
     "auto": None,
     "hungarian": "hu",
@@ -28,16 +26,16 @@ def normalize_lang(label: Optional[str]) -> Optional[str]:
     t = label.strip().lower()
     if t in LANG_MAP:
         return LANG_MAP[t]
-    # accept "hu (Hungarian)" or "Hungarian (hu)" or plain "hu"
-    m = re.search(r"\b([a-z]{2,3})\b", t)
+    m = re.search(r"\b([a-z]{2,3})\b", t)  # accept "es (Spanish)" or "Spanish (es)"
     if m:
         return m.group(1)
     return None
 
+# ---------- ASR model (lazy load) ----------
 _ASR_MODEL = None
 
 def get_asr_model():
-    """Load whisperx once, choosing safe compute_type for CPU/GPU."""
+    """Load whisperx once, with safe compute_type for CPU/GPU."""
     global _ASR_MODEL
     if _ASR_MODEL is not None:
         return _ASR_MODEL
@@ -57,42 +55,43 @@ def get_asr_model():
             raise
     return _ASR_MODEL
 
-# ---------- Chunking ----------
-def split_segment_into_word_chunks(
-    text: str, start: float, end: float, max_words: int
-) -> List[Dict]:
+# ---------- Transcription ----------
+def transcribe(audio_path: str, language_code: Optional[str]) -> Tuple[List[Dict], str, float, float]:
     """
-    Split one segment (with start/end) into sub-segments of up to max_words,
-    distributing time proportionally by token count (simple & robust).
+    Run ASR and return (segments, full_text, t_min, t_max).
+    We do NOT request word timestamps (keeps it fast & compatible).
     """
-    # naive tokenization by whitespace; keeps punctuation attached (good enough for timing)
+    model = get_asr_model()
+    result = model.transcribe(audio_path, language=language_code)
+    segments = result["segments"]
+    full_text = " ".join((seg.get("text") or "").strip() for seg in segments).strip()
+    if segments:
+        t_min = float(segments[0].get("start", 0.0) or 0.0)
+        t_max = float(segments[-1].get("end", 0.0) or t_min)
+    else:
+        t_min, t_max = 0.0, 0.0
+    return segments, full_text, t_min, t_max
+
+# ---------- Chunking (5-word by default) ----------
+def split_segment_into_word_chunks(text: str, start: float, end: float, max_words: int) -> List[Dict]:
     tokens = [t for t in text.strip().split() if t]
     if not tokens:
         return []
-
     duration = max(0.0, (end or 0.0) - (start or 0.0))
     per_token = duration / max(len(tokens), 1)
 
     chunks = []
-    idx = 0
-    while idx < len(tokens):
-        group = tokens[idx : idx + max_words]
+    i = 0
+    while i < len(tokens):
+        group = tokens[i : i + max_words]
         n = len(group)
-        c_start = start + idx * per_token
-        c_end = start + (idx + n) * per_token
-        chunks.append(
-            {
-                "start": round(c_start, 3),
-                "end": round(c_end, 3),
-                "text": " ".join(group),
-            }
-        )
-        idx += max_words
+        c_start = start + i * per_token
+        c_end = start + (i + n) * per_token
+        chunks.append({"start": round(c_start, 3), "end": round(c_end, 3), "text": " ".join(group)})
+        i += max_words
     return chunks
 
-
 def make_five_word_chunks(segments: List[Dict], max_words: int) -> List[Dict]:
-    """Apply 5-word (or N-word) chunking across the whole transcript."""
     out = []
     for seg in segments:
         seg_text = str(seg.get("text", "")).strip()
@@ -101,52 +100,64 @@ def make_five_word_chunks(segments: List[Dict], max_words: int) -> List[Dict]:
         out.extend(split_segment_into_word_chunks(seg_text, s, e, max_words))
     return out
 
+# ---------- Lyrics alignment ----------
+def parse_lyrics(raw: str) -> List[str]:
+    # one line per lyric line; drop empties
+    lines = [ln.strip() for ln in raw.replace("\r\n", "\n").split("\n")]
+    return [ln for ln in lines if ln]
 
-# ---------- Transcription ----------
-def transcribe(audio_path: str, language_code: Optional[str]) -> Tuple[List[Dict], str]:
-    """
-    Run ASR and return (segments, full_text).
-    We do NOT request word timestamps (keeps it fast & compatible).
-    """
-    model = get_asr_model()
-    result = model.transcribe(audio_path, language=language_code)
-    segments = result["segments"]
-    # Join raw text
-    full_text = " ".join((seg.get("text") or "").strip() for seg in segments).strip()
-    return segments, full_text
+def word_count(s: str) -> int:
+    return len([t for t in s.split() if t])
 
+def align_lyrics_to_timeline(
+    lyrics_lines: List[str], t_min: float, t_max: float
+) -> List[Dict]:
+    """
+    Assign each lyric line a start/end inside [t_min, t_max] proportionally to its word count.
+    This is simple, fast, and usually close enough for karaoke-like lines.
+    """
+    chunks: List[Dict] = []
+    total_words = sum(max(1, word_count(ln)) for ln in lyrics_lines) or 1
+    total_duration = max(0.0, t_max - t_min)
+    cursor = t_min
+    for ln in lyrics_lines:
+        wc = max(1, word_count(ln))
+        dur = total_duration * (wc / total_words)
+        start = cursor
+        end = cursor + dur
+        chunks.append({"start": round(start, 3), "end": round(end, 3), "text": ln})
+        cursor = end
+    # Small guard: ensure last chunk end does not exceed t_max due to rounding
+    if chunks:
+        chunks[-1]["end"] = round(t_max, 3)
+    return chunks
 
 # ---------- Formatting: SRT / ASS ----------
-def to_srt(chunks: List[Dict]) -> str:
-    def fmt_time(t: float) -> str:
-        t = max(0.0, t)
-        h = int(t // 3600)
-        m = int((t % 3600) // 60)
-        s = int(t % 60)
-        ms = int(round((t - math.floor(t)) * 1000))
-        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+def fmt_srt_time(t: float) -> str:
+    t = max(0.0, t)
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = int(t % 60)
+    ms = int(round((t - math.floor(t)) * 1000))
+    return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
+def to_srt(chunks: List[Dict]) -> str:
     lines = []
     for i, c in enumerate(chunks, 1):
         lines.append(str(i))
-        lines.append(f"{fmt_time(c['start'])} --> {fmt_time(c['end'])}")
+        lines.append(f"{fmt_srt_time(c['start'])} --> {fmt_srt_time(c['end'])}")
         lines.append(c["text"])
-        lines.append("")  # blank line
+        lines.append("")
     return "\n".join(lines)
 
-
 def hex_to_ass_bgr(hex_color: str) -> str:
-    """
-    Convert #RRGGBB → &HBBGGRR& (ASS BGR)
-    """
     hx = hex_color.lstrip("#")
     if len(hx) == 3:
-        hx = "".join(ch*2 for ch in hx)
+        hx = "".join(ch * 2 for ch in hx)
     r = int(hx[0:2], 16)
     g = int(hx[2:4], 16)
     b = int(hx[4:6], 16)
     return f"&H{b:02X}{g:02X}{r:02X}&"
-
 
 def to_ass(
     chunks: List[Dict],
@@ -161,15 +172,10 @@ def to_ass(
     bg_hex: str,
     vertical_margin: int = 40,
 ) -> str:
-    """
-    Build a simple ASS with a single style.
-    We approximate a "boxed background" by using a large border in the background color.
-    """
     text_col = hex_to_ass_bgr(text_hex)
     outline_col = hex_to_ass_bgr(outline_hex)
     bg_col = hex_to_ass_bgr(bg_hex)
 
-    # If bg box is on, we use the outline as a "fill" by setting border color to bg.
     style_outline_color = bg_col if bg_box else outline_col
     style_bord = max(0, outline_w if not bg_box else max(outline_w, 6))
 
@@ -202,19 +208,15 @@ def to_ass(
     events = []
     for c in chunks:
         txt = (c["text"] or "").replace("\n", "\\N")
-        events.append(
-            f"Dialogue: 0,{ass_time(c['start'])},{ass_time(c['end'])},Default,,0,0,0,,{txt}"
-        )
+        events.append(f"Dialogue: 0,{ass_time(c['start'])},{ass_time(c['end'])},Default,,0,0,0,,{txt}")
 
     return "\n".join(header + events)
-
 
 # ---------- Preview HTML ----------
 def compute_canvas_size(preset: str) -> Tuple[int, int]:
     if preset == "9:16 (phone/tiktok)":
         return (1080, 1920)
-    # default 16:9
-    return (1920, 1080)
+    return (1920, 1080)  # 16:9 default
 
 def preview_html(
     chunks: List[Dict],
@@ -227,67 +229,48 @@ def preview_html(
     bg_box: bool,
     bg_hex: str,
 ) -> str:
-    """
-    Simple visual preview: shows all text in one frame with chosen style.
-    (Not a time-playback preview — keeps frontend simple and fast.)
-    """
     playres_x, playres_y = compute_canvas_size(layout_preset)
-
-    # CSS for a center-bottom caption block
     box_bg = bg_hex if bg_box else "transparent"
     outline_css = (
         f" -{outline_w}px 0 {outline_hex}, {outline_w}px 0 {outline_hex},"
         f" 0 -{outline_w}px {outline_hex}, 0 {outline_w}px {outline_hex}"
-        if outline_w > 0 else " none"
+        if outline_w > 0
+        else " none"
     )
-
-    joined = " ".join(c.get("text", "") for c in chunks).strip()
-    if not joined:
-        joined = "<i>(no text)</i>"
+    joined = " ".join(c.get("text", "") for c in chunks).strip() or "<i>(no text)</i>"
 
     return f"""
-<div style="
-  background:#0b1020;
-  color:#e8f1ff;
-  padding:16px;
-  border-radius:16px;
-">
+<div style="background:#0b1020;color:#e8f1ff;padding:16px;border-radius:16px;">
   <div style="
-    width: 100%;
-    max-width: 1000px;
-    aspect-ratio: {playres_x} / {playres_y};
-    margin: 0 auto;
-    border-radius: 16px;
-    background: #11151f;
-    position: relative;
-    box-shadow: 0 8px 30px rgba(0,0,0,.35);
-    overflow: hidden;
+    width:100%;
+    max-width:1000px;
+    aspect-ratio:{playres_x}/{playres_y};
+    margin:0 auto;
+    border-radius:16px;
+    background:#11151f;
+    position:relative;
+    box-shadow:0 8px 30px rgba(0,0,0,.35);
+    overflow:hidden;
   ">
-    <div style="
-      position:absolute; left:0; right:0; bottom:6%;
-      display:flex; justify-content:center;
-    ">
+    <div style="position:absolute;left:0;right:0;bottom:6%;display:flex;justify-content:center;">
       <div style="
-        font-family: {'inherit' if font=='Default' else font}, system-ui, sans-serif;
-        font-size: {int(size)}px;
-        line-height: 1.35;
-        color: {text_hex};
+        font-family:{'inherit' if font=='Default' else font}, system-ui, sans-serif;
+        font-size:{int(size)}px;
+        line-height:1.35;
+        color:{text_hex};
         text-align:center;
-        padding: 8px 14px;
-        background: {box_bg};
-        border-radius: 12px;
+        padding:8px 14px;
+        background:{box_bg};
+        border-radius:12px;
         text-shadow:{outline_css};
-        max-width: 90%;
-      ">
-        {joined}
-      </div>
+        max-width:90%;
+      ">{joined}</div>
     </div>
   </div>
 </div>
 """
 
-
-# ---------- Pipeline (UI callback) ----------
+# ---------- Main pipeline ----------
 def run_pipeline(
     audio_path,
     language_label,
@@ -300,15 +283,21 @@ def run_pipeline(
     outline_w,
     bg_box,
     bg_hex,
+    use_lyrics,
+    lyrics_text,
 ):
     if not audio_path:
         raise gr.Error("Please upload an audio or video file (wav/mp3/mp4, etc.).")
 
     lang_code = normalize_lang(language_label)
-    segments, _ = transcribe(audio_path, lang_code)
-    chunks = make_five_word_chunks(segments, int(words_per_chunk))
+    segments, _, t_min, t_max = transcribe(audio_path, lang_code)
 
-    # preview & canvas dims
+    if use_lyrics and (lyrics_text or "").strip():
+        lines = parse_lyrics(lyrics_text)
+        chunks = align_lyrics_to_timeline(lines, t_min, t_max)
+    else:
+        chunks = make_five_word_chunks(segments, int(words_per_chunk))
+
     prev_html = preview_html(
         chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
     )
@@ -317,8 +306,16 @@ def run_pipeline(
     # write SRT + ASS to temp files for downloads
     srt_text = to_srt(chunks)
     ass_text = to_ass(
-        chunks, playres_x, playres_y, font if font != "Default" else "Arial",
-        int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
+        chunks,
+        playres_x,
+        playres_y,
+        font if font != "Default" else "Arial",
+        int(size),
+        text_hex,
+        outline_hex,
+        int(outline_w),
+        bool(bg_box),
+        bg_hex,
     )
 
     srt_path = os.path.join(tempfile.gettempdir(), f"subs_{uuid.uuid4().hex}.srt")
@@ -330,20 +327,12 @@ def run_pipeline(
 
     return prev_html, chunks, playres_x, playres_y, srt_path, ass_path
 
-
 # ---------- UI ----------
-FONT_CHOICES = [
-    "Default", "Arial", "Roboto", "Open Sans", "Lato", "Noto Sans", "Montserrat",
-]
-LANG_CHOICES = [
-    ("Auto-detect", "auto"),
-    ("Hungarian (hu)", "hungarian"),
-    ("Spanish (es)", "spanish"),
-]
+FONT_CHOICES = ["Default", "Arial", "Roboto", "Open Sans", "Lato", "Noto Sans", "Montserrat"]
+LANG_CHOICES = [("Auto-detect", "auto"), ("Hungarian (hu)", "hungarian"), ("Spanish (es)", "spanish")]
 LAYOUT_CHOICES = ["16:9 (YouTube)", "9:16 (phone/tiktok)"]
 
 custom_css = """
-/* dark canvas + readable titles */
 .gradio-container { max-width: 1180px !important; }
 body { background: #070b16; }
 h1, h2, h3, .prose h1, .prose h2, .prose h3 { color: #cfe2ff !important; }
@@ -353,20 +342,24 @@ h1, h2, h3, .prose h1, .prose h2, .prose h3 { color: #cfe2ff !important; }
 """
 
 with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
-    gr.Markdown("### <span id='header_version'>Build: v0.9.3</span>")
-    gr.Markdown("# 🎬 Five-Word Subtitle Chunker  \nFast ASR → clean chunks → SRT/ASS export")
+    gr.Markdown("### <span id='header_version'>Build: v1.0.0</span>")
+    gr.Markdown("# 🎬 Five-Word Chunker + Lyrics Time-coder  \nFast ASR → clean chunks or lyrics → SRT/ASS")
 
     with gr.Row():
         with gr.Column(scale=3):
             with gr.Group():
                 audio = gr.Audio(label="Audio / Video", type="filepath")
-                language = gr.Dropdown(
-                    choices=[c[0] for c in LANG_CHOICES],
-                    value="Auto-detect",
-                    label="Language"
-                )
-                words_per_chunk = gr.Slider(3, 8, value=5, step=1, label="Words per chunk")
+                language = gr.Dropdown(choices=[c[0] for c in LANG_CHOICES], value="Auto-detect", label="Language")
+                words_per_chunk = gr.Slider(3, 8, value=5, step=1, label="Words per chunk (when not using lyrics)")
                 layout_choice = gr.Dropdown(LAYOUT_CHOICES, value=LAYOUT_CHOICES[0], label="Layout preset")
+
+                with gr.Accordion("Lyrics mode (optional)", open=False):
+                    use_lyrics = gr.Checkbox(value=False, label="Use pasted lyrics instead of auto chunks")
+                    lyrics_box = gr.Textbox(
+                        label="Paste lyrics (one line per lyric line)",
+                        placeholder="line 1\nline 2\nline 3 ...",
+                        lines=10
+                    )
 
                 run_btn = gr.Button("Run", variant="primary")
 
@@ -395,7 +388,6 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
 
     def _run_and_return(*args):
         prev_html, chunks, px, py, srt_path, ass_path = run_pipeline(*args)
-        # For Gradio 4.44, provide file paths as return values to DownloadButton
         return prev_html, chunks, px, py, srt_path, ass_path
 
     run_btn.click(
@@ -404,12 +396,9 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
             audio, language, words_per_chunk,
             layout_choice, font_family, font_size,
             text_color, outline_color, outline_w,
-            bg_box, bg_color
+            bg_box, bg_color, use_lyrics, lyrics_box
         ],
-        outputs=[
-            preview_html_box, chunks_json, playres_x_box, playres_y_box,
-            srt_dl, ass_dl
-        ],
+        outputs=[preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl],
     )
 
 if __name__ == "__main__":
