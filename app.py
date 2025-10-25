@@ -1,10 +1,10 @@
-# Colorvideo Subs — v0.9.4
-# - Default text color is BLUE (#1E90FF).
-# - Stable with Gradio 4.44.x and CPU-only WhisperX.
-# - Chunk-by-N-words timing (no word_timestamps arg).
-# - SRT/ASS/VTT export + MP4 render (burn-in via ffmpeg).
+# Colorvideo Subs — v0.9.5
+# - Fix: replaced gr.escape_html with html.escape (Gradio 4 safe).
+# - Default text color = BLUE (#1E90FF).
+# - CPU-safe WhisperX; chunk-by-N-words timing.
+# - SRT/ASS/VTT export + MP4 render (ffmpeg).
 # - Boxed background toggle, outline, font size, layout presets.
-# - Simple per-line "nudge" editor with apply/refresh.
+# - Simple per-line nudge editor.
 
 import os
 import re
@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import subprocess
 from typing import List, Tuple
+from html import escape as html_escape  # <-- fix
 
 import gradio as gr
 import torch
@@ -47,7 +48,6 @@ def hex_to_rgb(hex_str: str) -> Tuple[int, int, int]:
     if hx.startswith("#"):
         hx = hx[1:]
     if len(hx) != 6:
-        # Try very defensive parse; fallback to white
         return (255, 255, 255)
     r = int(hx[0:2], 16)
     g = int(hx[2:4], 16)
@@ -56,10 +56,7 @@ def hex_to_rgb(hex_str: str) -> Tuple[int, int, int]:
 
 
 def rgb_to_ass(rr: int, gg: int, bb: int, alpha_hex: str = "00") -> str:
-    """
-    ASS expects &HAABBGGRR (AA=alpha, then BGR).
-    alpha_hex '00' = fully opaque, 'FF' = fully transparent.
-    """
+    """ASS color format &HAABBGGRR (AA alpha; then BGR)."""
     return f"&H{alpha_hex}{bb:02X}{gg:02X}{rr:02X}"
 
 
@@ -96,7 +93,6 @@ def get_asr_model():
     try:
         _asr_model = whisperx.load_model("small", device=device, compute_type=compute)
     except ValueError as e:
-        # CPU fallback on exotic hosts
         if "compute type" in str(e).lower():
             fallback = "int16" if device == "cpu" else "float32"
             _asr_model = whisperx.load_model("small", device=device, compute_type=fallback)
@@ -109,12 +105,10 @@ def get_asr_model():
 
 def transcribe(audio_path: str, language_code: str | None):
     model = get_asr_model()
-    # NOTE: whisperx FasterWhisperPipeline.transcribe does NOT take word_timestamps here.
+    # FasterWhisperPipeline here does not take word_timestamps
     result = model.transcribe(audio_path, language=language_code)
-    # result["segments"] = [{start, end, text, ...}, ...]
     segments = result["segments"]
     full_text = " ".join(seg["text"].strip() for seg in segments)
-    # Duration (approx) for later
     duration = 0.0
     if segments:
         duration = max(duration, float(segments[-1]["end"]))
@@ -122,10 +116,6 @@ def transcribe(audio_path: str, language_code: str | None):
 
 
 def split_segments_by_n_words(segments: List[dict], words_per_chunk: int) -> List[dict]:
-    """
-    Split each segment text into chunks of N words and distribute the time
-    proportionally by word count.
-    """
     if words_per_chunk <= 0:
         words_per_chunk = 5
 
@@ -143,17 +133,13 @@ def split_segments_by_n_words(segments: List[dict], words_per_chunk: int) -> Lis
 
         total = len(words)
         total_dur = max(en - st, 0.01)
-
-        # Approx per-word duration
         per = total_dur / total
 
-        # Walk in chunks
         idx = 0
         cur_start = st
         while idx < total:
             chunk_words = words[idx:idx + words_per_chunk]
             chunk_text = " ".join(chunk_words)
-            # Duration proportional to chunk size
             chunk_dur = per * len(chunk_words)
             chunk_end = cur_start + chunk_dur
 
@@ -166,7 +152,6 @@ def split_segments_by_n_words(segments: List[dict], words_per_chunk: int) -> Lis
             cur_start = chunk_end
             idx += words_per_chunk
 
-    # Ensure monotonic
     out.sort(key=lambda d: (d["start"], d["end"]))
     return out
 
@@ -202,20 +187,14 @@ def to_ass(chunks: List[dict],
            bg_hex: str,
            video_w: int,
            video_h: int) -> str:
-    """
-    Build a minimal ASS with styling similar to our preview controls.
-    """
-    # Colors (ASS is BGR + alpha)
-    text_col = hex_to_ass_bgr(text_hex, alpha_hex="00")
-    outline_col = hex_to_ass_bgr(outline_hex, alpha_hex="00")
 
-    # If boxed background, use BorderStyle=3 (opaque box).
-    # BackColour needs ALPHA. Lower AA = more opaque.
+    text_col = hex_to_ass_bgr(text_hex or "#1E90FF", alpha_hex="00")
+    outline_col = hex_to_ass_bgr(outline_hex or "#000000", alpha_hex="00")
+
     if boxed_bg:
-        back_col = hex_to_ass_bgr(bg_hex, alpha_hex="00")  # fully opaque box
+        back_col = hex_to_ass_bgr(bg_hex or "#0B0E12", alpha_hex="00")  # opaque box
         border_style = 3
     else:
-        # No box
         back_col = hex_to_ass_bgr("#000000", alpha_hex="FF")  # fully transparent
         border_style = 1
 
@@ -246,7 +225,7 @@ f"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Tex
     for c in chunks:
         s = seconds_to_timestamp(c["start"]).replace(",", ".")
         e = seconds_to_timestamp(c["end"]).replace(",", ".")
-        txt = c["text"].replace("\n", "\\N")
+        txt = (c["text"] or "").replace("\n", "\\N")
         events.append(f"Dialogue: 0,{s},{e},Default,,0,0,0,,{txt}")
 
     return header + "\n".join(events) + "\n"
@@ -272,13 +251,11 @@ def build_from_chunks(
     bg_color: str,
     layout_preset: str
 ):
-    # Layout preset sizes
     if layout_preset.startswith("9:16"):
         vw, vh = 1080, 1920
     else:
         vw, vh = 1280, 720
 
-    # Simple HTML preview (not video burn-in)
     style_html = f"""
 <style>
 .preview-wrap {{
@@ -293,13 +270,13 @@ def build_from_chunks(
   font-family: {'inherit' if font_family=='Default' else font_family}, sans-serif;
   font-size: {int(font_size)}px;
   line-height: 1.35;
-  color: {text_color};
+  color: {text_color or '#1E90FF'};
   text-shadow:
-    -{outline_w}px 0 {outline_color},
-     {outline_w}px 0 {outline_color},
-     0 -{outline_w}px {outline_color},
-     0  {outline_w}px {outline_color};
-  {"background: " + bg_color + "; padding: 4px 8px; border-radius: 6px;" if boxed_bg else ""}
+    -{outline_w}px 0 {outline_color or '#000000'},
+     {outline_w}px 0 {outline_color or '#000000'},
+     0 -{outline_w}px {outline_color or '#000000'},
+     0  {outline_w}px {outline_color or '#000000'};
+  {"background: " + (bg_color or '#0B0E12') + "; padding: 4px 8px; border-radius: 6px;" if boxed_bg else ""}
 }}
 .row {{ margin: 8px 0; }}
 .time {{ opacity: .5; font-size: 12px }}
@@ -307,31 +284,30 @@ def build_from_chunks(
 """
     lines = []
     for c in chunks:
+        safe_txt = html_escape(c.get("text", ""))
         lines.append(
             f"<div class='row'><span class='time'>[{c['start']:.2f}–{c['end']:.2f}]</span> "
-            f"<span class='bubble'>{gr.escape_html(c['text'])}</span></div>"
+            f"<span class='bubble'>{safe_txt}</span></div>"
         )
     preview_html = style_html + f"<div class='preview-wrap'>{''.join(lines)}</div>"
 
-    # Build subtitle files
     srt_text = to_srt(chunks)
     vtt_text = to_vtt(chunks)
     ass_text = to_ass(
         chunks,
         font_family=font_family if font_family != "Default" else "Arial",
         font_size=font_size,
-        text_hex=text_color,
-        outline_hex=outline_color,
+        text_hex=text_color or "#1E90FF",
+        outline_hex=outline_color or "#000000",
         outline_w=outline_w,
         boxed_bg=boxed_bg,
-        bg_hex=bg_color,
+        bg_hex=bg_color or "#0B0E12",
         video_w=vw, video_h=vh
     )
     srt_path = write_text_file(srt_text, ".srt")
     vtt_path = write_text_file(vtt_text, ".vtt")
     ass_path = write_text_file(ass_text, ".ass")
 
-    # Tiny "axis preview" JSONs
     px = json.dumps({"w": vw, "h": vh})
     py = json.dumps({"n": len(chunks)})
 
@@ -354,8 +330,6 @@ def render_with_subs(
     out_dir = tempfile.mkdtemp()
     out_path = os.path.join(out_dir, sanitize_filename(out_basename) + ".mp4")
 
-    # If we have a real video, burn onto it; otherwise create a blank canvas and attach audio if present.
-    cmd = []
     if media_path and media_path.lower().endswith((".mp4", ".mov", ".mkv", ".webm")):
         cmd = [
             "ffmpeg", "-y", "-i", media_path,
@@ -364,11 +338,8 @@ def render_with_subs(
             out_path
         ]
     else:
-        # Create color canvas and (optionally) add audio
-        # Probe duration if we can (fallback to 60s)
         duration = 60
         if media_path:
-            # Quick probe via ffprobe (best-effort)
             try:
                 probe = subprocess.run(
                     ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -379,7 +350,6 @@ def render_with_subs(
             except Exception:
                 pass
 
-        # Build a blank video, then overlay ASS, and if audio exists (mp3/wav), map it in.
         if media_path and media_path.lower().endswith((".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg")):
             cmd = [
                 "ffmpeg", "-y",
@@ -421,9 +391,8 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
 .gradio-container { max-width: 1280px !important; }
 .dark .gradio-container { background: #0A0D12; }
 """) as demo:
-    gr.Markdown("### 🎨 Colorvideo Subs — v0.9.4")
+    gr.Markdown("### 🎨 Colorvideo Subs — v0.9.5")
 
-    # States for downloadable files
     srt_state = gr.State("")
     ass_state = gr.State("")
     vtt_state = gr.State("")
@@ -439,11 +408,9 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
                                   label="Words per chunk (when not using lyrics)")
             layout = gr.Dropdown(LAYOUT_CHOICES, value="16:9 (YouTube)", label="Layout preset")
 
-            # Optional lyrics (not retiming yet, just for future extension)
             lyrics_box = gr.Textbox(label="Lyrics mode (optional)",
                                     placeholder="Paste lyrics here (one line per lyric line)", lines=4)
 
-            # global shift tool
             shift = gr.Slider(-5, 5, value=0, step=0.1, label="Global shift (seconds)")
 
             run_btn = gr.Button("Run", variant="primary")
@@ -451,7 +418,6 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             preview = gr.HTML(label="Preview")
             table = gr.JSON(label="Segments (JSON)")
 
-            # Downloads
             srt_dl = gr.File(label="Download SRT")
             ass_dl = gr.File(label="Download ASS")
             vtt_dl = gr.File(label="Download VTT")
@@ -463,14 +429,13 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             gr.Markdown("#### Subtitle Style")
             font_family = gr.Dropdown(FONT_CHOICES, value="Default", label="Font")
             font_size   = gr.Slider(14, 72, value=36, step=1, label="Font size")
-            # *** Default text color = BLUE ***
-            text_color  = gr.ColorPicker(value="#1E90FF", label="Text color")  # DodgerBlue
+            text_color  = gr.ColorPicker(value="#1E90FF", label="Text color")  # BLUE
             outline_color = gr.ColorPicker(value="#000000", label="Outline color")
             outline_w   = gr.Slider(0, 6, value=2, step=1, label="Outline width (px)")
 
             gr.Markdown("#### Background")
             boxed_bg = gr.Checkbox(value=True, label="Boxed background behind text")
-            bg_color = gr.ColorPicker(value="#0B0E12", label="Background color")  # deep navy
+            bg_color = gr.ColorPicker(value="#0B0E12", label="Background color")
 
             gr.Markdown("#### Per-line editor")
             apply_refresh = gr.Checkbox(value=True, label="Apply edits & refresh")
@@ -489,20 +454,14 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             raise gr.Error("Please upload an audio or video file.")
 
         lang_code = normalize_lang(lang_ui)
-
-        # Do ASR
         segs, _, _ = transcribe(media_path, lang_code)
-
-        # Chunking
         chunks = split_segments_by_n_words(segs, int(words))
 
-        # Apply global shift
         if abs(float(shift_sec)) > 1e-6:
             for c in chunks:
                 c["start"] = round(c["start"] + float(shift_sec), 3)
                 c["end"]   = round(c["end"] + float(shift_sec), 3)
 
-        # Build preview + files
         prev_html, px, py, srt_path, ass_path, vtt_path = build_from_chunks(
             chunks=chunks,
             font_family=font_family,
@@ -514,17 +473,9 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
             bg_color=bg_color,
             layout_preset=layout_preset
         )
+        return (chunks, prev_html, srt_path, ass_path, vtt_path, media_path, ass_path)
 
-        # Update states for later download / render
-        return (
-            chunks,                         # JSON table
-            prev_html,                      # preview HTML
-            srt_path, ass_path, vtt_path,   # files to mount to File components
-            media_path,                     # remember the source
-            ass_path                        # remember ASS for renderer
-        )
-
-    out = run_btn.click(
+    run_btn.click(
         run_pipeline,
         inputs=[
             media, language, words_per, layout, lyrics_box, shift,
@@ -534,7 +485,6 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
         outputs=[table, preview, srt_dl, ass_dl, vtt_dl, last_media_state, preview_ass_state]
     )
 
-    # Nudge buttons mutate JSON timings (client-side-ish via Python)
     def nudge_json(json_data, delta, do_apply):
         if not do_apply or not json_data:
             return json_data
@@ -552,7 +502,6 @@ with gr.Blocks(theme=gr.themes.Soft(), css="""
     nudge_minus.click(lambda js: nudge_json(js, -0.10, True), inputs=[table], outputs=[table])
     nudge_plus.click(lambda js: nudge_json(js, +0.10, True), inputs=[table], outputs=[table])
 
-    # Render to MP4 using the current ASS
     def do_render(media_path, ass_path, layout_preset):
         if not ass_path:
             raise gr.Error("No ASS file available. Click Run first.")
