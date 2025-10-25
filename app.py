@@ -240,7 +240,7 @@ def save_file(content: str, extension: str) -> str:
 # -------------------------- Simple Subtitle Editor HTML --------------------------
 
 def create_interactive_editor(subtitles: List[dict]) -> str:
-    """Create an interactive editor where you can click words to change colors"""
+    """Create a full word-processor style editor with text selection, formatting, and editing"""
     
     if not subtitles:
         return "<p>No subtitles to edit</p>"
@@ -253,41 +253,60 @@ def create_interactive_editor(subtitles: List[dict]) -> str:
         display_subs = subtitles
         warning = ""
     
+    # Convert subtitles to JSON for JavaScript
+    subs_json = json.dumps(display_subs, ensure_ascii=False).replace("'", "\\'")
+    
     html = f"""
     <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; font-family: Arial;">
         {warning}
-        <h3>Click on any word to change its color:</h3>
-        <div id="subtitle-editor">
+        <h3>Edit your subtitles like Microsoft Word:</h3>
+        
+        <div style="background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+            <h4 style="margin-top: 0;">Keyboard Shortcuts:</h4>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                <div><strong>Ctrl+B</strong> - Bold</div>
+                <div><strong>Ctrl+I</strong> - Italic</div>
+                <div><strong>Ctrl+U</strong> - Underline</div>
+                <div><strong>Shift+F</strong> - Font menu</div>
+                <div><strong>Shift+S</strong> - Size menu</div>
+                <div><strong>Select text</strong> - Color picker appears</div>
+            </div>
+            <p style="margin: 10px 0 0 0; font-size: 13px; color: #666;">
+                You can also click and type to fix transcription errors!
+            </p>
+        </div>
+        
+        <div id="subtitle-editor" style="background: white; padding: 20px; border-radius: 8px; min-height: 300px;">
 """
     
-    # Build interactive editor for each subtitle line
+    # Build editable text for each subtitle line
     for line_idx, sub in enumerate(display_subs):
         time_str = f"{sub['start']:.1f}s - {sub['end']:.1f}s"
         
         html += f"""
-        <div style="margin-bottom: 20px; padding: 15px; background: white; border-radius: 8px; border-left: 4px solid {BANNER_COLOR};">
-            <div style="color: #666; font-size: 12px; margin-bottom: 8px;">Line {line_idx + 1} | {time_str}</div>
-            <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+        <div style="margin-bottom: 25px; padding: 15px; background: #fafafa; border-radius: 8px; border-left: 4px solid {BANNER_COLOR};">
+            <div style="color: #666; font-size: 12px; margin-bottom: 10px;">Line {line_idx + 1} | {time_str}</div>
+            <div id="line_{line_idx}" 
+                 class="editable-line" 
+                 contenteditable="true"
+                 data-line="{line_idx}"
+                 style="font-size: 20px; line-height: 1.6; cursor: text; user-select: text; 
+                        padding: 10px; border: 1px solid #ddd; border-radius: 4px; background: white;
+                        outline: none;">
 """
         
-        # Add each word with color picker
+        # Add each word as a styled span
         words = sub.get('words', [])
         colors = sub.get('colors', [])
         
         for word_idx, word in enumerate(words):
             word_text = word['text']
-            current_color = colors[word_idx] if word_idx < len(colors) else "#FFFFFF"
+            current_color = colors[word_idx] if word_idx < len(colors) else "#000000"
             
-            html += f"""
-                <div style="display: flex; align-items: center; gap: 4px; background: #f9f9f9; padding: 6px 10px; border-radius: 4px;">
-                    <input type="color" 
-                           id="color_{line_idx}_{word_idx}" 
-                           value="{current_color}"
-                           style="width: 30px; height: 30px; border: none; cursor: pointer;"
-                           onchange="updateWordColor({line_idx}, {word_idx}, this.value)">
-                    <span style="font-size: 16px; padding: 0 4px;" id="word_{line_idx}_{word_idx}">{word_text}</span>
-                </div>
-"""
+            html += f"""<span id="word_{line_idx}_{word_idx}" 
+                            data-line="{line_idx}" 
+                            data-word="{word_idx}"
+                            style="color: {current_color};">{word_text}</span> """
         
         html += """
             </div>
@@ -297,106 +316,302 @@ def create_interactive_editor(subtitles: List[dict]) -> str:
     html += """
         </div>
         
-        <div style="margin-top: 20px; padding: 15px; background: #e3f2fd; border-radius: 8px;">
-            <h4 style="margin-top: 0;">Quick Color Presets:</h4>
-            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                <button onclick="applyPresetColor('#FF6B6B')" style="padding: 8px 15px; background: #FF6B6B; border: none; border-radius: 4px; cursor: pointer; color: white;">Feminine/Red</button>
-                <button onclick="applyPresetColor('#4ECDC4')" style="padding: 8px 15px; background: #4ECDC4; border: none; border-radius: 4px; cursor: pointer; color: white;">Masculine/Cyan</button>
-                <button onclick="applyPresetColor('#FFD93D')" style="padding: 8px 15px; background: #FFD93D; border: none; border-radius: 4px; cursor: pointer; color: black;">Verb/Yellow</button>
-                <button onclick="applyPresetColor('#95E1D3')" style="padding: 8px 15px; background: #95E1D3; border: none; border-radius: 4px; cursor: pointer; color: black;">Adjective/Green</button>
-                <button onclick="applyPresetColor('#F38181')" style="padding: 8px 15px; background: #F38181; border: none; border-radius: 4px; cursor: pointer; color: white;">Important/Pink</button>
-                <button onclick="applyPresetColor('#AA96DA')" style="padding: 8px 15px; background: #AA96DA; border: none; border-radius: 4px; cursor: pointer; color: white;">Conjugation/Purple</button>
-                <button onclick="applyPresetColor('#FFFFFF')" style="padding: 8px 15px; background: #FFFFFF; border: 2px solid #ccc; border-radius: 4px; cursor: pointer; color: black;">Reset/White</button>
+        <!-- Context Menu (appears on text selection) -->
+        <div id="context-menu" style="
+            display: none;
+            position: fixed;
+            background: white;
+            border: 2px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            z-index: 10000;
+            min-width: 280px;">
+            
+            <div style="margin-bottom: 15px;">
+                <strong>Color:</strong><br>
+                <input type="color" id="color-picker" value="#000000" 
+                       style="width: 100%; height: 40px; margin-top: 5px; cursor: pointer;">
             </div>
-            <p style="font-size: 13px; color: #666; margin-top: 10px;">
-                Select words by clicking them, then click a preset color button. Or use the color picker next to each word.
-            </p>
+            
+            <div style="margin-bottom: 15px;">
+                <strong>Font (Shift+F):</strong><br>
+                <select id="font-picker" style="width: 100%; padding: 8px; margin-top: 5px; font-size: 14px;">
+                    <option value="Arial">Arial</option>
+                    <option value="Times New Roman">Times New Roman</option>
+                    <option value="Courier New">Courier New</option>
+                    <option value="Georgia">Georgia</option>
+                    <option value="Verdana">Verdana</option>
+                    <option value="Comic Sans MS">Comic Sans MS</option>
+                    <option value="Impact">Impact</option>
+                    <option value="Trebuchet MS">Trebuchet MS</option>
+                </select>
+            </div>
+            
+            <div style="margin-bottom: 15px;">
+                <strong>Size (Shift+S):</strong><br>
+                <select id="size-picker" style="width: 100%; padding: 8px; margin-top: 5px; font-size: 14px;">
+                    <option value="12">12px</option>
+                    <option value="14">14px</option>
+                    <option value="16">16px</option>
+                    <option value="18">18px</option>
+                    <option value="20" selected>20px</option>
+                    <option value="24">24px</option>
+                    <option value="28">28px</option>
+                    <option value="32">32px</option>
+                    <option value="36">36px</option>
+                    <option value="42">42px</option>
+                    <option value="48">48px</option>
+                    <option value="56">56px</option>
+                    <option value="64">64px</option>
+                    <option value="72">72px</option>
+                </select>
+            </div>
+            
+            <div style="margin-bottom: 15px;">
+                <strong>Style:</strong><br>
+                <div style="display: flex; gap: 5px; margin-top: 5px;">
+                    <button id="bold-btn" onclick="toggleBold()" 
+                            style="flex: 1; padding: 8px; background: #f0f0f0; border: 1px solid #ccc; 
+                                   border-radius: 4px; cursor: pointer; font-weight: bold;">B</button>
+                    <button id="italic-btn" onclick="toggleItalic()" 
+                            style="flex: 1; padding: 8px; background: #f0f0f0; border: 1px solid #ccc; 
+                                   border-radius: 4px; cursor: pointer; font-style: italic;">I</button>
+                    <button id="underline-btn" onclick="toggleUnderline()" 
+                            style="flex: 1; padding: 8px; background: #f0f0f0; border: 1px solid #ccc; 
+                                   border-radius: 4px; cursor: pointer; text-decoration: underline;">U</button>
+                </div>
+            </div>
+            
+            <button onclick="applyStyles()" 
+                    style="width: 100%; padding: 12px; background: {BANNER_COLOR}; color: white; 
+                           border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 15px;">
+                Apply Changes
+            </button>
+            
+            <button onclick="closeContextMenu()" 
+                    style="width: 100%; padding: 10px; background: #ccc; color: #333; 
+                           border: none; border-radius: 4px; cursor: pointer; margin-top: 8px;">
+                Cancel (Esc)
+            </button>
         </div>
         
-        <input type="hidden" id="subtitle-data" value='""" + json.dumps(subtitles, ensure_ascii=False).replace("'", "\\'") + """'>
+        <!-- Quick Color Presets -->
+        <div style="margin-top: 20px; padding: 15px; background: #fff3e0; border-radius: 8px;">
+            <h4 style="margin-top: 0;">Quick Colors (select text first, then click):</h4>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <button onclick="quickColor('#FF6B6B')" style="padding: 10px 16px; background: #FF6B6B; border: none; border-radius: 4px; cursor: pointer; color: white; font-weight: bold;">Feminine/Red</button>
+                <button onclick="quickColor('#4ECDC4')" style="padding: 10px 16px; background: #4ECDC4; border: none; border-radius: 4px; cursor: pointer; color: white; font-weight: bold;">Masculine/Cyan</button>
+                <button onclick="quickColor('#FFD93D')" style="padding: 10px 16px; background: #FFD93D; border: none; border-radius: 4px; cursor: pointer; color: black; font-weight: bold;">Verb/Yellow</button>
+                <button onclick="quickColor('#95E1D3')" style="padding: 10px 16px; background: #95E1D3; border: none; border-radius: 4px; cursor: pointer; color: black; font-weight: bold;">Adjective/Green</button>
+                <button onclick="quickColor('#F38181')" style="padding: 10px 16px; background: #F38181; border: none; border-radius: 4px; cursor: pointer; color: white; font-weight: bold;">Important/Pink</button>
+                <button onclick="quickColor('#AA96DA')" style="padding: 10px 16px; background: #AA96DA; border: none; border-radius: 4px; cursor: pointer; color: white; font-weight: bold;">Conjugation/Purple</button>
+                <button onclick="quickColor('#000000')" style="padding: 10px 16px; background: #000000; border: none; border-radius: 4px; cursor: pointer; color: white; font-weight: bold;">Black</button>
+                <button onclick="quickColor('#FFFFFF')" style="padding: 10px 16px; background: #FFFFFF; border: 2px solid #333; border-radius: 4px; cursor: pointer; color: black; font-weight: bold;">White</button>
+            </div>
+        </div>
         
         <script>
-            let subtitleData = JSON.parse(document.getElementById('subtitle-data').value);
-            let selectedWords = new Set();
+            let selectedRange = null;
+            let subtitleData = {subs_json};
+            let currentStyles = {{
+                bold: false,
+                italic: false,
+                underline: false
+            }};
             
-            // Update individual word color
-            function updateWordColor(lineIdx, wordIdx, color) {
-                if (lineIdx < subtitleData.length && wordIdx < subtitleData[lineIdx].colors.length) {
-                    subtitleData[lineIdx].colors[wordIdx] = color;
-                    
-                    // Update visual feedback
-                    const wordSpan = document.getElementById('word_' + lineIdx + '_' + wordIdx);
-                    if (wordSpan) {
-                        wordSpan.style.color = color;
-                        wordSpan.style.fontWeight = 'bold';
-                    }
-                    
-                    // Send data back to Python
-                    sendUpdateToPython();
-                }
-            }
-            
-            // Toggle word selection
-            function toggleWordSelection(lineIdx, wordIdx) {
-                const key = lineIdx + '_' + wordIdx;
-                const wordSpan = document.getElementById('word_' + lineIdx + '_' + wordIdx);
+            // Show context menu on text selection
+            document.addEventListener('mouseup', function(e) {{
+                const selection = window.getSelection();
+                const selectedText = selection.toString().trim();
                 
-                if (selectedWords.has(key)) {
-                    selectedWords.delete(key);
-                    wordSpan.style.backgroundColor = 'transparent';
-                } else {
-                    selectedWords.add(key);
-                    wordSpan.style.backgroundColor = '#ffffcc';
-                }
-            }
+                if (selectedText.length > 0) {{
+                    selectedRange = selection.getRangeAt(0);
+                    
+                    // Position context menu near selection
+                    const menu = document.getElementById('context-menu');
+                    menu.style.display = 'block';
+                    menu.style.left = e.pageX + 'px';
+                    menu.style.top = (e.pageY + 10) + 'px';
+                    
+                    // Get current color from selection
+                    const container = selectedRange.commonAncestorContainer;
+                    const element = container.nodeType === 3 ? container.parentElement : container;
+                    const currentColor = window.getComputedStyle(element).color;
+                    
+                    // Convert RGB to hex (simplified)
+                    document.getElementById('color-picker').value = rgbToHex(currentColor);
+                }} else {{
+                    // Hide menu if no selection
+                    document.getElementById('context-menu').style.display = 'none';
+                }}
+            }});
             
-            // Add click handlers to words
-            document.querySelectorAll('[id^="word_"]').forEach(span => {
-                span.style.cursor = 'pointer';
-                span.onclick = function() {
-                    const parts = this.id.split('_');
-                    toggleWordSelection(parseInt(parts[1]), parseInt(parts[2]));
-                };
-            });
+            // Keyboard shortcuts
+            document.addEventListener('keydown', function(e) {{
+                const selection = window.getSelection();
+                const hasSelection = selection.toString().trim().length > 0;
+                
+                // Ctrl+B - Bold
+                if (e.ctrlKey && e.key === 'b' && hasSelection) {{
+                    e.preventDefault();
+                    document.execCommand('bold');
+                    currentStyles.bold = !currentStyles.bold;
+                }}
+                
+                // Ctrl+I - Italic
+                if (e.ctrlKey && e.key === 'i' && hasSelection) {{
+                    e.preventDefault();
+                    document.execCommand('italic');
+                    currentStyles.italic = !currentStyles.italic;
+                }}
+                
+                // Ctrl+U - Underline
+                if (e.ctrlKey && e.key === 'u' && hasSelection) {{
+                    e.preventDefault();
+                    document.execCommand('underline');
+                    currentStyles.underline = !currentStyles.underline;
+                }}
+                
+                // Shift+F - Show font picker
+                if (e.shiftKey && e.key === 'F' && hasSelection) {{
+                    e.preventDefault();
+                    document.getElementById('font-picker').focus();
+                }}
+                
+                // Shift+S - Show size picker
+                if (e.shiftKey && e.key === 'S' && hasSelection) {{
+                    e.preventDefault();
+                    document.getElementById('size-picker').focus();
+                }}
+                
+                // Esc - Close context menu
+                if (e.key === 'Escape') {{
+                    closeContextMenu();
+                }}
+            }});
             
-            // Apply preset color to selected words
-            function applyPresetColor(color) {
-                if (selectedWords.size === 0) {
-                    alert('Please click on words to select them first!');
+            // Close context menu when clicking outside
+            document.addEventListener('click', function(e) {{
+                const menu = document.getElementById('context-menu');
+                if (!menu.contains(e.target) && e.target !== menu) {{
+                    const selection = window.getSelection();
+                    if (selection.toString().trim().length === 0) {{
+                        closeContextMenu();
+                    }}
+                }}
+            }});
+            
+            function closeContextMenu() {{
+                document.getElementById('context-menu').style.display = 'none';
+                selectedRange = null;
+            }}
+            
+            function toggleBold() {{
+                currentStyles.bold = !currentStyles.bold;
+                document.getElementById('bold-btn').style.background = 
+                    currentStyles.bold ? '{BANNER_COLOR}' : '#f0f0f0';
+                document.getElementById('bold-btn').style.color = 
+                    currentStyles.bold ? 'white' : 'black';
+            }}
+            
+            function toggleItalic() {{
+                currentStyles.italic = !currentStyles.italic;
+                document.getElementById('italic-btn').style.background = 
+                    currentStyles.italic ? '{BANNER_COLOR}' : '#f0f0f0';
+                document.getElementById('italic-btn').style.color = 
+                    currentStyles.italic ? 'white' : 'black';
+            }}
+            
+            function toggleUnderline() {{
+                currentStyles.underline = !currentStyles.underline;
+                document.getElementById('underline-btn').style.background = 
+                    currentStyles.underline ? '{BANNER_COLOR}' : '#f0f0f0';
+                document.getElementById('underline-btn').style.color = 
+                    currentStyles.underline ? 'white' : 'black';
+            }}
+            
+            function applyStyles() {{
+                if (!selectedRange) return;
+                
+                const selection = window.getSelection();
+                selection.removeAllRanges();
+                selection.addRange(selectedRange);
+                
+                // Apply color
+                const color = document.getElementById('color-picker').value;
+                document.execCommand('foreColor', false, color);
+                
+                // Apply font
+                const font = document.getElementById('font-picker').value;
+                document.execCommand('fontName', false, font);
+                
+                // Apply size
+                const size = document.getElementById('size-picker').value;
+                const container = selectedRange.commonAncestorContainer;
+                const element = container.nodeType === 3 ? container.parentElement : container;
+                element.style.fontSize = size;
+                
+                // Apply bold/italic/underline
+                if (currentStyles.bold) document.execCommand('bold');
+                if (currentStyles.italic) document.execCommand('italic');
+                if (currentStyles.underline) document.execCommand('underline');
+                
+                closeContextMenu();
+                
+                // Save changes
+                saveAllChanges();
+            }}
+            
+            function quickColor(color) {{
+                const selection = window.getSelection();
+                if (selection.toString().trim().length === 0) {{
+                    alert('Please select some text first!');
                     return;
-                }
+                }}
                 
-                selectedWords.forEach(key => {
-                    const [lineIdx, wordIdx] = key.split('_').map(Number);
-                    const colorPicker = document.getElementById('color_' + lineIdx + '_' + wordIdx);
-                    if (colorPicker) {
-                        colorPicker.value = color;
-                        updateWordColor(lineIdx, wordIdx, color);
-                    }
-                });
-                
-                // Clear selection
-                selectedWords.forEach(key => {
-                    const [lineIdx, wordIdx] = key.split('_').map(Number);
-                    const wordSpan = document.getElementById('word_' + lineIdx + '_' + wordIdx);
-                    if (wordSpan) {
-                        wordSpan.style.backgroundColor = 'transparent';
-                    }
-                });
-                selectedWords.clear();
-            }
+                document.execCommand('foreColor', false, color);
+                saveAllChanges();
+            }}
             
-            // Send updated data back to Python via Gradio
-            function sendUpdateToPython() {
-                // Store in hidden input for Gradio to pick up
-                document.getElementById('subtitle-data').value = JSON.stringify(subtitleData);
+            function rgbToHex(rgb) {{
+                if (rgb.startsWith('#')) return rgb;
+                const match = rgb.match(/\\d+/g);
+                if (!match) return '#000000';
+                const r = parseInt(match[0]);
+                const g = parseInt(match[1]);
+                const b = parseInt(match[2]);
+                return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+            }}
+            
+            function saveAllChanges() {{
+                // Update subtitle data with edited content
+                document.querySelectorAll('.editable-line').forEach(line => {{
+                    const lineIdx = parseInt(line.dataset.line);
+                    if (lineIdx < subtitleData.length) {{
+                        subtitleData[lineIdx].text = line.innerText.trim();
+                        
+                        // Extract word colors
+                        const words = Array.from(line.querySelectorAll('span[data-word]'));
+                        subtitleData[lineIdx].colors = words.map(w => {{
+                            return window.getComputedStyle(w).color;
+                        }});
+                    }}
+                }});
                 
-                // Trigger custom event that Gradio can listen to
-                window.parent.postMessage({
+                // Send update back to Python
+                window.parent.postMessage({{
                     type: 'subtitle_update',
                     data: subtitleData
-                }, '*');
-            }
+                }}, '*');
+                
+                console.log('Changes saved!');
+            }}
+            
+            // Auto-save on blur
+            document.querySelectorAll('.editable-line').forEach(line => {{
+                line.addEventListener('blur', saveAllChanges);
+            }});
         </script>
     </div>
     """
