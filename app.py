@@ -16,8 +16,8 @@ import whisperx
 
 # -------------------------- Config --------------------------
 
-VERSION = "1.1"
-BANNER_COLOR = "#2E7D32"  # Green for v1.1
+VERSION = "1.1c"
+BANNER_COLOR = "#1976D2"  # Blue for v1.1c
 
 LANG_MAP = {
     "auto": None, "auto-detect": None, "automatic": None,
@@ -380,7 +380,12 @@ def create_app():
                     value="<p style='text-align: center; color: #888;'>Upload audio and click Transcribe to begin</p>"
                 )
                 
-                subtitle_json = gr.JSON(label="Subtitle Data (edit colors here, then click Update Preview)")
+                subtitle_json = gr.JSON(
+                    label="Subtitle Data (edit colors here, then click Update Preview)",
+                    visible=False  # Start hidden for speed
+                )
+                
+                show_json_btn = gr.Button("Show/Edit JSON Data (for color editing)")
                 
                 update_preview_btn = gr.Button("Update Preview from JSON")
         
@@ -496,6 +501,13 @@ def create_app():
             fn=do_export_ass,
             inputs=[subtitles_state, font_family_state, font_size_state],
             outputs=[ass_file]
+        )
+        
+        # Toggle JSON visibility
+        show_json_btn.click(
+            fn=lambda: gr.update(visible=True),
+            inputs=[],
+            outputs=[subtitle_json]
         )
         
         # Sync JSON with state
