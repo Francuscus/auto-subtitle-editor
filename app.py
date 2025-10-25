@@ -1,244 +1,313 @@
 import os
 import re
-import io
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+import json
+import math
+from typing import List, Tuple, Optional
 
 import gradio as gr
 import torch
-from faster_whisper import WhisperModel
+import whisperx
 
-# --------------------- Config ---------------------
-TITLE = "🎨 Colorvideo Subs"
-THEME = gr.themes.Soft()
 
-# Pick a small model for CPU. Change to "base" if you want a bit more accuracy.
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL", "tiny")
+# ==============================
+# Language helpers
+# ==============================
+LANG_MAP = {
+    "auto": None, "auto-detect": None, "automatic": None,
+    "spanish": "es", "es": "es",
+    "hungarian": "hu", "hu": "hu",
+    # keep a few common extras in case users type them
+    "english": "en", "en": "en",
+}
 
-# --------------------- Language helpers ---------------------
-LANG_CHOICES = [
-    ("Auto-detect", None),
-    ("Spanish (es)", "es"),
-    ("Hungarian (hu)", "hu"),
-    ("English (en)", "en"),
-]
-
-def normalize_lang(v: Optional[str]) -> Optional[str]:
-    if not v or v == "None":
+def normalize_lang(s: Optional[str]) -> Optional[str]:
+    if not s:
         return None
-    t = str(v).strip().lower()
-    # accept "es (Spanish)" or "Spanish (es)"
+    t = s.strip().lower()
+    if t in LANG_MAP:
+        return LANG_MAP[t]
+    # Accept labels like "Spanish (es)" or "es (Spanish)"
     m = re.search(r"\b([a-z]{2,3})\b", t)
-    return m.group(1) if m else None
+    if m:
+        code = m.group(1)
+        return LANG_MAP.get(code, code)
+    return None
 
-# --------------------- Load model (CPU-friendly) ---------------------
-_model: Optional[WhisperModel] = None
 
-def get_model() -> WhisperModel:
-    global _model
-    if _model is not None:
-        return _model
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    compute = "float16" if device == "cuda" else "int8"
-    # vad_filter off = faster startup, we’ll rely on Whisper itself
-    _model = WhisperModel(
-        WHISPER_MODEL_SIZE,
-        device=device,
-        compute_type=compute
-    )
-    return _model
+# ==============================
+# WhisperX model (lazy / CPU-safe)
+# ==============================
+_asr_model = None
 
-# --------------------- Types ---------------------
-@dataclass
-class Word:
-    text: str
-    start: float
-    end: float
+def get_asr_model():
+    global _asr_model
+    if _asr_model is not None:
+        return _asr_model
 
-@dataclass
-class Segment:
-    text: str
-    start: float
-    end: float
-    words: List[Word]
+    use_cuda = torch.cuda.is_available()
+    device = "cuda" if use_cuda else "cpu"
+    compute = "float16" if use_cuda else "int8"  # int8 on CPU to avoid the float16 error
 
-# --------------------- Transcription ---------------------
-def transcribe(audio_path: str, language_code: Optional[str]) -> Tuple[List[Segment], str]:
-    model = get_model()
-    # beam_size=1 for speed, word_timestamps=True to enable later word highlighting
-    segments_iter, _ = model.transcribe(
-        audio_path,
-        language=language_code,
-        beam_size=1,
-        word_timestamps=True
-    )
-    segs: List[Segment] = []
-    all_text = []
-    for s in segments_iter:
-        words = []
-        for w in (s.words or []):
-            # words might be None for very short segments
-            words.append(Word(text=w.word, start=max(0.0, w.start or s.start), end=max(0.0, w.end or s.end)))
-        text_clean = (s.text or "").strip()
-        if not text_clean:
-            continue
-        segs.append(Segment(text=text_clean, start=float(s.start), end=float(s.end), words=words))
-        all_text.append(text_clean)
-    return segs, " ".join(all_text)
+    try:
+        _asr_model = whisperx.load_model("small", device=device, compute_type=compute)
+    except ValueError as e:
+        # Fallback if the host CPU lacks the needed int8 kernels
+        if "compute type" in str(e).lower():
+            fallback = "int16" if device == "cpu" else "float32"
+            _asr_model = whisperx.load_model("small", device=device, compute_type=fallback)
+        else:
+            raise
+    return _asr_model
 
-# --------------------- Simple lyrics retime ---------------------
-def split_into_lines(raw: str) -> List[str]:
-    raw = (raw or "").strip()
-    if not raw:
-        return []
-    lines = [ln.strip() for ln in raw.replace("\r", "").split("\n") if ln.strip()]
-    # Allow a paragraph: break on sentence-ish boundaries
-    if len(lines) == 1:
-        para = lines[0]
-        lines = [p.strip() for p in re.split(r"(?<=[\.\!\?…])\s+", para) if p.strip()]
-    return lines
 
-def retime_lyrics(lines: List[str], speech_spans: List[Tuple[float, float]]) -> List[Tuple[str, float, float]]:
+# ==============================
+# ASR & simple retiming
+# ==============================
+def transcribe(audio_path: str, language_code: Optional[str]) -> Tuple[List[dict], str]:
     """
-    Very simple alignment:
-    - Take total speech duration (sum of segment durations)
-    - Distribute lines evenly across that duration in order.
-    Good enough for karaoke-style quick timing. You can refine later.
+    Returns (segments, full_text)
+    segments list items: {start, end, text}
     """
-    if not lines or not speech_spans:
-        return []
-    # flatten contiguous speech span into one big span
-    total_start = speech_spans[0][0]
-    total_end   = speech_spans[-1][1]
-    total_dur   = max(0.01, total_end - total_start)
-    n = len(lines)
-    out = []
+    model = get_asr_model()
+    # Important: do NOT pass unsupported kwargs (e.g., word_timestamps) — some builds error.
+    result = model.transcribe(audio_path, language=language_code)
+    segs = result.get("segments", [])
+    text = " ".join(s.get("text", "").strip() for s in segs).strip()
+    # Normalize segment fields (guard against None)
+    cleaned = []
+    for s in segs:
+        cleaned.append({
+            "start": float(max(0.0, s.get("start", 0.0) or 0.0)),
+            "end": float(max(0.0, s.get("end", 0.0) or 0.0)),
+            "text": (s.get("text") or "").strip(),
+        })
+    return cleaned, text
+
+
+def spread_lyrics_over_duration(lines: List[str], duration: float) -> List[dict]:
+    """
+    Evenly spread given lyric lines across [0, duration].
+    Returns segments [{start,end,text}, ...]
+    """
+    n = max(1, len(lines))
+    step = duration / n
+    segs = []
     for i, line in enumerate(lines):
-        a = total_start + (i / n) * total_dur
-        b = total_start + ((i + 1) / n) * total_dur
-        out.append((line, a, b))
-    return out
+        start = step * i
+        end = step * (i + 1) if i < n - 1 else duration
+        segs.append({"start": start, "end": end, "text": line.strip()})
+    return segs
 
-# --------------------- Exporters ---------------------
-def to_srt(items: List[Tuple[str, float, float]]) -> str:
-    def ts(x: float) -> str:
-        h = int(x // 3600); m = int((x % 3600) // 60); s = int(x % 60); ms = int((x - int(x)) * 1000)
-        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+def retime_with_lyrics(original: List[dict], lyrics_text: str) -> List[dict]:
+    """
+    Very lightweight retime: take user-provided lyric lines and
+    distribute them evenly across the total original timeline.
+    """
+    lines = [ln.strip() for ln in lyrics_text.splitlines() if ln.strip()]
+    if not lines:
+        return original
+
+    if not original:
+        # No detected segments: assume a 60s clip for safety.
+        total = 60.0
+    else:
+        total = max(0.0, original[-1]["end"] - original[0]["start"])
+
+    return spread_lyrics_over_duration(lines, total)
+
+
+# ==============================
+# Export helpers (SRT / ASS)
+# ==============================
+def secs_to_ts(t: float) -> str:
+    t = max(0.0, float(t))
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = int(t % 60)
+    ms = int(round((t - math.floor(t)) * 1000))
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+def secs_to_ass_ts(t: float) -> str:
+    t = max(0.0, float(t))
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = int(t % 60)
+    cs = int(round((t - math.floor(t)) * 100))  # centiseconds
+    return f"{h:01d}:{m:02d}:{s:02d}.{cs:02d}"
+
+def make_srt(segments: List[dict]) -> str:
     lines = []
-    for i, (text, a, b) in enumerate(items, 1):
-        lines.append(str(i))
-        lines.append(f"{ts(a)} --> {ts(b)}")
-        lines.append(text)
-        lines.append("")
-    return "\n".join(lines)
+    for i, s in enumerate(segments, 1):
+        start = secs_to_ts(s["start"])
+        end = secs_to_ts(s["end"])
+        text = (s["text"] or "").strip()
+        lines += [str(i), f"{start} --> {end}", text, ""]
+    return "\n".join(lines).strip() + "\n"
 
-def to_ass(items: List[Tuple[str, float, float]],
-           font="Arial", size=32, color="#FFFFFF", outline="#000000", outline_px=2) -> str:
-    def ass_time(x: float) -> str:
-        h = int(x // 3600); m = int((x % 3600) // 60); s = x % 60
-        return f"{h:d}:{m:02d}:{s:05.2f}"
-    def ass_rgb(hexcol: str) -> str:
-        hexcol = hexcol.lstrip("#")
-        r = int(hexcol[0:2],16); g = int(hexcol[2:4],16); b = int(hexcol[4:6],16)
-        return f"&H{0:02X}{b:02X}{g:02X}{r:02X}"
-    hdr = [
-        "[Script Info]",
-        "ScriptType: v4.00+",
-        "",
-        "[V4+ Styles]",
-        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
-        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
-        "Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Default,{font},{size},{ass_rgb(color)},{ass_rgb(color)},{ass_rgb(outline)},{ass_rgb('#000000')},"
-        f"0,0,0,0,100,100,0,0,1,{outline_px},0,2,10,10,10,1",
-        "",
-        "[Events]",
-        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
-    ]
-    ev = []
-    for text, a, b in items:
-        ev.append(f"Dialogue: 0,{ass_time(a)},{ass_time(b)},Default,,0,0,0,,{text}")
-    return "\n".join(hdr + ev)
+def make_ass(segments: List[dict], font_family: str, font_size: int,
+             text_color: str, outline_color: str, outline_w: int) -> str:
+    # ASS colors are BGR in &HBBGGRR format; for simplicity we won't convert hex.
+    # We embed font/size, and simple outline settings in a single style.
+    style = (
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,{font_family if font_family!='Default' else 'Arial'},{int(font_size)},"
+        "&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,"
+        f"{max(0,int(outline_w))},0,2,10,10,20,1\n"
+    )
 
-# --------------------- Gradio app ---------------------
-custom_css = """
-:root { --bg: #0f1220; --panel: #151a2e; --ink: #e9ecff; }
-.gradio-container { max-width: 1200px !important; }
-body { background: var(--bg); }
-.dark .prose, .gradio-container * { color: var(--ink); }
-.settings-card { position: sticky; top: 12px; background: var(--panel); border-radius: 16px; padding: 8px; }
-.label, .wrap .label-wrap span { color: #c5ccff !important; }
-"""
+    events = ["[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"]
+    for s in segments:
+        start = secs_to_ass_ts(s["start"])
+        end = secs_to_ass_ts(s["end"])
+        text = (s["text"] or "").replace("\n", "\\N")
+        events.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
 
-def run_pipeline(audio_path, language_ui, font_family, font_size, txt_color, outline_color, outline_w,
-                 use_lyrics, lyrics_text):
-    # 1) Transcribe
+    header = (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        "PlayResX: 1280\n"
+        "PlayResY: 720\n"
+        "WrapStyle: 2\n"
+        "ScaledBorderAndShadow: yes\n"
+    )
+    return "\n".join([header, style, "\n".join(events)]) + "\n"
+
+
+# ==============================
+# UI callback
+# ==============================
+def run_pipeline(
+    audio_path,
+    language_ui,
+    font_family, font_size, text_color, outline_color, outline_w,
+    use_lyrics_retime, lyrics_text
+):
+    if not audio_path:
+        raise gr.Error("Please upload an audio or video file first.")
+
     lang_code = normalize_lang(language_ui)
     segments, full_text = transcribe(audio_path, lang_code)
 
-    # 2) Build speech spans for optional retime
-    speech_spans = [(s.start, s.end) for s in segments]
-    preview_html = f"""
-<div style="font-family:{'inherit' if font_family=='Default' else font_family}, sans-serif;
-            font-size:{int(font_size)}px; line-height:1.35; color:{txt_color};
-            text-shadow:
-              -{outline_w}px 0 {outline_color},
-               {outline_w}px 0 {outline_color},
-               0 -{outline_w}px {outline_color},
-               0 {outline_w}px {outline_color};">
-    {full_text}
-</div>"""
-
-    # 3) Decide what to export
-    if use_lyrics and (lyrics := split_into_lines(lyrics_text)):
-        items = retime_lyrics(lyrics, speech_spans)
+    if use_lyrics_retime and lyrics_text.strip():
+        segments_out = retime_with_lyrics(segments, lyrics_text)
     else:
-        # export the detected segments as-is
-        items = [(s.text, s.start, s.end) for s in segments]
+        segments_out = segments
 
-    srt_txt = to_srt(items)
-    ass_txt = to_ass(items, font=font_family if font_family != "Default" else "Arial",
-                     size=int(font_size), color=txt_color, outline=outline_color, outline_px=int(outline_w))
-    return preview_html, [s.__dict__ for s in segments], srt_txt, ass_txt
+    # Live preview HTML (CSS inline for simplicity)
+    styled_html = f"""
+<div style="
+  font-family:{'inherit' if font_family=='Default' else font_family}, sans-serif;
+  font-size:{int(font_size)}px;
+  line-height:1.35;
+  color:{text_color};
+  text-shadow:
+    -{outline_w}px 0 {outline_color},
+    {outline_w}px 0 {outline_color},
+    0 -{outline_w}px {outline_color},
+    0 {outline_w}px {outline_color};
+  padding: 12px 16px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 12px;
+">
+{full_text}
+</div>
+""".strip()
 
-with gr.Blocks(theme=THEME, css=custom_css, fill_height=True) as demo:
-    gr.Markdown(f"# {TITLE}\nSmall, fast CPU subtitles with style panel →")
+    srt_text = make_srt(segments_out)
+    ass_text = make_ass(segments_out, font_family, int(font_size), text_color, outline_color, int(outline_w))
+
+    return styled_html, segments_out, srt_text, ass_text
+
+
+def download_file(contents: str, filename: str) -> str:
+    path = f"/tmp/{filename}"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(contents)
+    return path
+
+
+# ==============================
+# Gradio app
+# ==============================
+custom_css = """
+/* Make differences obvious (dark UI with purple accents) */
+:root { --radius-lg: 14px; }
+.gradio-container { max-width: 1280px !important; }
+.theme-dark body { background: #0f1220; }
+#titlebar h1 { color: #FFFFFF !important; }
+.grey-note { color: #a7adc0; }
+.preview-card .label-wrap > label { color: #cdd3eb !important; }
+"""
+
+with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
+    gr.Markdown("# 🎨 Colorvideo Subs", elem_id="titlebar")
+    gr.Markdown(
+        "<span class='grey-note'>Upload audio/video, pick language (Auto/ES/HU),"
+        " tweak font & colors on the right, (optionally) paste lyrics to retime,"
+        " then export SRT/ASS.</span>",
+        elem_classes=["grey-note"]
+    )
 
     with gr.Row():
         with gr.Column(scale=3):
             audio = gr.Audio(label="Audio / Video (mp3, wav, mp4)", type="filepath")
-            language = gr.Dropdown(LANG_CHOICES, value=None, label="Language")
-            run = gr.Button("Run", variant="primary")
 
-            preview = gr.HTML(label="Preview")
-            segs = gr.JSON(label="Segments")
-            with gr.Tab("Export"):
-                srt_box = gr.Code(label="SRT", language="text")
-                ass_box = gr.Code(label="ASS", language="text")
-                gr.Markdown("Copy, or **right-click → Save as…** to download.")
+            language = gr.Dropdown(
+                label="Language",
+                choices=[("Auto-detect", "auto"), ("Spanish (es)", "es"), ("Hungarian (hu)", "hu")],
+                value="auto"
+            )
+
+            run_btn = gr.Button("Run", variant="primary")
+
+            preview = gr.HTML(label="Preview", elem_classes=["preview-card"])
+            segments_json = gr.JSON(label="Segments")
+
+            with gr.Accordion("Export", open=True):
+                srt_box = gr.Code(label="SRT", language="plaintext", interactive=False)
+                ass_box = gr.Code(label="ASS", language="plaintext", interactive=False)
+                with gr.Row():
+                    srt_dl = gr.DownloadButton("Download SRT", file_name="subtitles.srt")
+                    ass_dl = gr.DownloadButton("Download ASS", file_name="subtitles.ass")
 
         with gr.Column(scale=1):
-            with gr.Group(elem_classes=["settings-card"]):
+            with gr.Group():
                 gr.Markdown("### Subtitle Settings")
-                font_family = gr.Dropdown(["Default","Arial","Roboto","Open Sans","Lato","Montserrat","Noto Sans"],
-                                          value="Default", label="Font")
+                font_family = gr.Dropdown(
+                    ["Default", "Arial", "Roboto", "Open Sans", "Lato", "Noto Sans", "Montserrat"],
+                    value="Default", label="Font"
+                )
                 font_size = gr.Slider(14, 72, value=34, step=1, label="Font size")
-                txt_color = gr.ColorPicker(value="#FFFFFF", label="Text color")
+                text_color = gr.ColorPicker(value="#FFFFFF", label="Text color")
                 outline_color = gr.ColorPicker(value="#000000", label="Outline color")
                 outline_w = gr.Slider(0, 4, value=2, step=1, label="Outline width (px)")
 
-            with gr.Group(elem_classes=["settings-card"]):
+            with gr.Group():
                 gr.Markdown("### Optional lyrics (retime)")
-                use_lyrics = gr.Checkbox(label="Use pasted lyrics to retime")
-                lyrics_text = gr.Textbox(label="Paste lyrics or lines here",
-                                         placeholder="One line per subtitle… or paste a paragraph.",
-                                         lines=10)
+                use_lyrics = gr.Checkbox(value=False, label="Use pasted lyrics to retime")
+                lyrics_box = gr.Textbox(
+                    label="Paste lyrics or lines here",
+                    placeholder="One line per subtitle… or paste a paragraph and I'll split by lines.",
+                    lines=10
+                )
 
-    run.click(
+    # Wire up
+    run_btn.click(
         run_pipeline,
-        inputs=[audio, language, font_family, font_size, txt_color, outline_color, outline_w, use_lyrics, lyrics_text],
-        outputs=[preview, segs, srt_box, ass_box]
+        inputs=[audio, language, font_family, font_size, text_color, outline_color, outline_w, use_lyrics, lyrics_box],
+        outputs=[preview, segments_json, srt_box, ass_box]
     )
 
+    # Download handlers: take current text in SRT/ASS panes and write files
+    srt_dl.click(lambda s: download_file(s, "subtitles.srt"), inputs=[srt_box], outputs=srt_dl)
+    ass_dl.click(lambda a: download_file(a, "subtitles.ass"), inputs=[ass_box], outputs=ass_dl)
+
+
 if __name__ == "__main__":
+    # IMPORTANT for Spaces: set share=True only if you want a public link locally.
     demo.launch()
