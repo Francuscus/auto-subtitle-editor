@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 import os, re, json, tempfile, subprocess, shlex
-from typing import List, Tuple
+from typing import List
 from html import unescape
 
 import gradio as gr
@@ -447,5 +447,4 @@ def create_app():
 
 if __name__ == "__main__":
     demo = create_app()
-    # SSR can be left enabled by HF; keep defaults simple:
     demo.launch()
