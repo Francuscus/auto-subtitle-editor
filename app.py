@@ -1,5 +1,5 @@
 # app.py — Five-Word Subtitle Chunker + Lyrics Timecoding + Global Shift + WebVTT + Per-line Editor
-# Version: v1.2.0 (2025-10-25)
+# Version: v1.2.1 (2025-10-25)
 
 import os
 import re
@@ -24,9 +24,12 @@ def normalize_lang(label: Optional[str]) -> Optional[str]:
     if not label:
         return None
     t = label.strip().lower()
+    if t in ("auto", "auto-detect", "autodetect"):
+        return None
     if t in LANG_MAP:
         return LANG_MAP[t]
-    m = re.search(r"\b([a-z]{2,3})\b", t)  # accept "es (Spanish)" or "Spanish (es)"
+    # accept "es (Spanish)" or "Spanish (es)"
+    m = re.search(r"\b([a-z]{2,3})\b", t)
     if m:
         return m.group(1)
     return None
@@ -38,7 +41,7 @@ def get_asr_model():
     """Load whisperx once, with safe compute_type for CPU/GPU."""
     global _ASR_MODEL
     if _ASR_MODEL is not None:
-        return _ASSR_MODEL  # intentional: typo caught below
+        return _ASR_MODEL
 
     use_cuda = torch.cuda.is_available()
     device = "cuda" if use_cuda else "cpu"
@@ -55,24 +58,6 @@ def get_asr_model():
             raise
     return _ASR_MODEL
 
-# Fix the small typo above so we don't crash:
-def get_asr_model():
-    global _ASR_MODEL
-    if _ASR_MODEL is not None:
-        return _ASR_MODEL
-    use_cuda = torch.cuda.is_available()
-    device = "cuda" if use_cuda else "cpu"
-    compute = "float16" if use_cuda else "int8"
-    try:
-        _ASR_MODEL = whisperx.load_model("small", device=device, compute_type=compute)
-    except ValueError as e:
-        if "compute type" in str(e).lower():
-            fallback = "int16" if device == "cpu" else "float32"
-            _ASR_MODEL = whisperx.load_model("small", device=device, compute_type=fallback)
-        else:
-            raise
-    return _ASR_MODEL
-
 # ---------- Transcription ----------
 def transcribe(audio_path: str, language_code: Optional[str]) -> Tuple[List[Dict], str, float, float]:
     """
@@ -80,8 +65,9 @@ def transcribe(audio_path: str, language_code: Optional[str]) -> Tuple[List[Dict
     We do NOT request word timestamps (keeps it fast & compatible).
     """
     model = get_asr_model()
+    # language_code can be None (auto)
     result = model.transcribe(audio_path, language=language_code)
-    segments = result["segments"]
+    segments = result.get("segments", [])
     full_text = " ".join((seg.get("text") or "").strip() for seg in segments).strip()
     if segments:
         t_min = float(segments[0].get("start", 0.0) or 0.0)
@@ -120,7 +106,6 @@ def make_five_word_chunks(segments: List[Dict], max_words: int) -> List[Dict]:
 
 # ---------- Lyrics alignment ----------
 def parse_lyrics(raw: str) -> List[str]:
-    # one line per lyric line; drop empties
     lines = [ln.strip() for ln in raw.replace("\r\n", "\n").split("\n")]
     return [ln for ln in lines if ln]
 
@@ -130,9 +115,6 @@ def word_count(s: str) -> int:
 def align_lyrics_to_timeline(
     lyrics_lines: List[str], t_min: float, t_max: float
 ) -> List[Dict]:
-    """
-    Assign each lyric line a start/end inside [t_min, t_max] proportionally to its word count.
-    """
     chunks: List[Dict] = []
     total_words = sum(max(1, word_count(ln)) for ln in lyrics_lines) or 1
     total_duration = max(0.0, t_max - t_min)
@@ -144,7 +126,6 @@ def align_lyrics_to_timeline(
         end = cursor + dur
         chunks.append({"start": round(start, 3), "end": round(end, 3), "text": ln})
         cursor = end
-    # ensure end equals t_max
     if chunks:
         chunks[-1]["end"] = round(t_max, 3)
     return chunks
@@ -348,11 +329,6 @@ def table_to_chunks(table: List[List]) -> List[Dict]:
     return out
 
 # ---------- Build preview + files from chunks ----------
-def compute_canvas_size(preset: str) -> Tuple[int, int]:
-    if preset == "9:16 (phone/tiktok)":
-        return (1080, 1920)
-    return (1920, 1080)
-
 def build_from_chunks(
     chunks: List[Dict],
     layout_preset: str,
@@ -414,7 +390,7 @@ def run_pipeline(
     global_shift,
 ):
     if not audio_path:
-        raise gr.Error("Please upload an audio or video file (wav/mp3/mp4, etc.).")
+        raise ValueError("Please upload an audio or video file (wav/mp3/mp4, etc.).")
 
     lang_code = normalize_lang(language_label)
     segments, _, t_min, t_max = transcribe(audio_path, lang_code)
@@ -425,7 +401,6 @@ def run_pipeline(
     else:
         chunks = make_five_word_chunks(segments, int(words_per_chunk))
 
-    # apply global shift (can be negative or positive)
     chunks = apply_global_shift(chunks, float(global_shift))
 
     table = chunks_to_table(chunks)
@@ -449,11 +424,11 @@ h1, h2, h3, .prose h1, .prose h2, .prose h3 { color: #cfe2ff !important; }
 """
 
 with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
-    gr.Markdown("### <span id='header_version'>Build: v1.2.0</span>")
+    gr.Markdown("### <span id='header_version'>Build: v1.2.1</span>")
     gr.Markdown("# 🎬 Chunker + Lyrics + Global Shift + Editor  \nFast ASR → edit timing → SRT/ASS/VTT")
 
-    # keep a state with current chunks
     chunks_state = gr.State([])  # List[Dict]
+    status = gr.State("")        # last error message
 
     with gr.Row():
         with gr.Column(scale=3):
@@ -468,13 +443,15 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
                     lyrics_box = gr.Textbox(
                         label="Paste lyrics (one line per lyric line)",
                         placeholder="line 1\nline 2\nline 3 ...",
-                        lines=10
+                        lines=8
                     )
 
                 with gr.Accordion("Timing tools", open=False):
                     global_shift = gr.Slider(-5.0, 5.0, value=0.0, step=0.1, label="Global shift (seconds)")
 
                 run_btn = gr.Button("Run", variant="primary")
+
+            status_box = gr.Textbox(label="Status", value="", interactive=False)
 
             preview_html_box = gr.HTML(label="Preview")
             chunks_json = gr.JSON(label="Chunks (debug / export)")
@@ -520,13 +497,17 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
     # --- Handlers ---
 
     def _run_and_return(*args):
-        chunks, table_data, prev_html, px, py, srt_path, ass_path, vtt_path = run_pipeline(*args)
-        return (
-            chunks,                   # state
-            prev_html, chunks, px, py,
-            srt_path, ass_path, vtt_path,
-            table_data
-        )
+        try:
+            chunks, table_data, prev_html, px, py, srt_path, ass_path, vtt_path = run_pipeline(*args)
+            return (
+                "",                    # status ok
+                chunks,                # state
+                prev_html, chunks, px, py,
+                srt_path, ass_path, vtt_path,
+                table_data
+            )
+        except Exception as e:
+            return (f"Error: {e}", gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip())
 
     run_btn.click(
         _run_and_return,
@@ -537,7 +518,8 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
             bg_box, bg_color, use_lyrics, lyrics_box, global_shift
         ],
         outputs=[
-            chunks_state,            # update state
+            status_box,             # NEW: show errors
+            chunks_state,           # update state
             preview_html_box, chunks_json, playres_x_box, playres_y_box,
             srt_dl, ass_dl, vtt_dl,
             table
@@ -546,67 +528,76 @@ with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
 
     # Apply edits from table to state + rebuild preview/files
     def _apply_edits(table_data, layout_preset, font, size, text_hex, outline_hex, outline_w, bg_box, bg_hex, current_chunks):
-        new_chunks = table_to_chunks(table_data)
-        if not new_chunks:
-            # keep current if user cleared table accidentally
-            new_chunks = current_chunks or []
-        prev_html, px, py, srt_path, ass_path, vtt_path = build_from_chunks(
-            new_chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
-        )
-        return (
-            new_chunks,  # state
-            prev_html, new_chunks, px, py,
-            srt_path, ass_path, vtt_path,
-            chunks_to_table(new_chunks)
-        )
+        try:
+            new_chunks = table_to_chunks(table_data)
+            if not new_chunks:
+                new_chunks = current_chunks or []
+            prev_html, px, py, srt_path, ass_path, vtt_path = build_from_chunks(
+                new_chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
+            )
+            return (
+                "",                   # status ok
+                new_chunks,           # state
+                prev_html, new_chunks, px, py,
+                srt_path, ass_path, vtt_path,
+                chunks_to_table(new_chunks)
+            )
+        except Exception as e:
+            return (f"Error: {e}", gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip())
 
     apply_edits_btn.click(
         _apply_edits,
         inputs=[table, layout_choice, font_family, font_size, text_color, outline_color, outline_w, bg_box, bg_color, chunks_state],
-        outputs=[chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
+        outputs=[status_box, chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
     )
 
     # Sort by start
     def _sort_chunks(current_chunks, layout_preset, font, size, text_hex, outline_hex, outline_w, bg_box, bg_hex):
-        new_chunks = sorted(current_chunks or [], key=lambda x: (x["start"], x["end"]))
-        prev_html, px, py, srt_path, ass_path, vtt_path = build_from_chunks(
-            new_chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
-        )
-        return (
-            new_chunks,
-            prev_html, new_chunks, px, py,
-            srt_path, ass_path, vtt_path,
-            chunks_to_table(new_chunks)
-        )
+        try:
+            new_chunks = sorted(current_chunks or [], key=lambda x: (x["start"], x["end"]))
+            prev_html, px, py, srt_path, ass_path, vtt_path = build_from_chunks(
+                new_chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
+            )
+            return (
+                "", new_chunks,
+                prev_html, new_chunks, px, py,
+                srt_path, ass_path, vtt_path,
+                chunks_to_table(new_chunks)
+            )
+        except Exception as e:
+            return (f"Error: {e}", gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip())
 
     sort_btn.click(
         _sort_chunks,
         inputs=[chunks_state, layout_choice, font_family, font_size, text_color, outline_color, outline_w, bg_box, bg_color],
-        outputs=[chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
+        outputs=[status_box, chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
     )
 
     # Quick nudges: ±0.10s
     def _nudge(current_chunks, delta, layout_preset, font, size, text_hex, outline_hex, outline_w, bg_box, bg_hex):
-        new_chunks = apply_global_shift(current_chunks or [], float(delta))
-        prev_html, px, py, srt_path, ass_path, vtt_path = build_from_chunks(
-            new_chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
-        )
-        return (
-            new_chunks,
-            prev_html, new_chunks, px, py,
-            srt_path, ass_path, vtt_path,
-            chunks_to_table(new_chunks)
-        )
+        try:
+            new_chunks = apply_global_shift(current_chunks or [], float(delta))
+            prev_html, px, py, srt_path, ass_path, vtt_path = build_from_chunks(
+                new_chunks, layout_preset, font, int(size), text_hex, outline_hex, int(outline_w), bool(bg_box), bg_hex
+            )
+            return (
+                "", new_chunks,
+                prev_html, new_chunks, px, py,
+                srt_path, ass_path, vtt_path,
+                chunks_to_table(new_chunks)
+            )
+        except Exception as e:
+            return (f"Error: {e}", gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip(), gr.Skip())
 
     nudge_earlier_btn.click(
         _nudge,
         inputs=[chunks_state, gr.State(-0.10), layout_choice, font_family, font_size, text_color, outline_color, outline_w, bg_box, bg_color],
-        outputs=[chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
+        outputs=[status_box, chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
     )
     nudge_later_btn.click(
         _nudge,
         inputs=[chunks_state, gr.State(+0.10), layout_choice, font_family, font_size, text_color, outline_color, outline_w, bg_box, bg_color],
-        outputs=[chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
+        outputs=[status_box, chunks_state, preview_html_box, chunks_json, playres_x_box, playres_y_box, srt_dl, ass_dl, vtt_dl, table],
     )
 
 if __name__ == "__main__":
