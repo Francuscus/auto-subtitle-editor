@@ -1,8 +1,9 @@
 gradio==4.44.0
 whisperx==3.7.4
-faster-whisper>=1.2.0,<2
-av>=12,<13
+faster-whisper==1.2.0
+ctranslate2==4.6.0
 torch==2.8.0
 torchaudio==2.8.0
-pysubs2==1.8.0
+av==12.3.0
 ffmpeg-python>=0.2.0
+numpy>=1.26,<3
