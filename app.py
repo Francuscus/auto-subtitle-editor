@@ -16,8 +16,8 @@ import whisperx
 
 # -------------------------- Config --------------------------
 
-VERSION = "1.2"
-BANNER_COLOR = "#F57C00"  # Orange for v1.2
+VERSION = "1.3"
+BANNER_COLOR = "#9C27B0"  # Purple for v1.3
 
 LANG_MAP = {
     "auto": None, "auto-detect": None, "automatic": None,
@@ -239,59 +239,165 @@ def save_file(content: str, extension: str) -> str:
 
 # -------------------------- Simple Subtitle Editor HTML --------------------------
 
-def create_simple_editor(subtitles: List[dict]) -> str:
-    """Create a simple, lightweight subtitle editor"""
+def create_interactive_editor(subtitles: List[dict]) -> str:
+    """Create an interactive editor where you can click words to change colors"""
     
-    # Limit display for performance
-    if len(subtitles) > 50:
-        display_subs = subtitles[:50]
-        warning = f"<p style='color: orange; font-size: 14px;'>Showing first 50 of {len(subtitles)} subtitles for speed. Full export will include all.</p>"
+    if not subtitles:
+        return "<p>No subtitles to edit</p>"
+    
+    # Limit for performance
+    if len(subtitles) > 30:
+        display_subs = subtitles[:30]
+        warning = f"<p style='color: orange;'>Showing first 30 of {len(subtitles)} lines for editing. All lines will be exported.</p>"
     else:
         display_subs = subtitles
         warning = ""
     
-    # Build simple HTML table
-    rows_html = []
-    for i, sub in enumerate(display_subs):
-        time_str = f"{sub['start']:.2f} - {sub['end']:.2f}s"
-        
-        # Word chips with colors
-        word_chips = []
-        for j, word in enumerate(sub.get('words', [])):
-            color = sub.get('colors', [])[j] if j < len(sub.get('colors', [])) else "#FFFFFF"
-            word_chips.append(
-                f'<span style="background: {color}; padding: 4px 8px; margin: 2px; '
-                f'border-radius: 4px; display: inline-block; color: #000;">{word["text"]}</span>'
-            )
-        
-        words_html = " ".join(word_chips)
-        
-        rows_html.append(f"""
-            <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #ddd; width: 150px;">{time_str}</td>
-                <td style="padding: 10px; border-bottom: 1px solid #ddd;">{sub['text']}</td>
-                <td style="padding: 10px; border-bottom: 1px solid #ddd;">{words_html}</td>
-            </tr>
-        """)
-    
     html = f"""
-    <div style="background: #f5f5f5; padding: 20px; border-radius: 8px;">
+    <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; font-family: Arial;">
         {warning}
-        <table style="width: 100%; border-collapse: collapse; background: white;">
-            <thead>
-                <tr style="background: {BANNER_COLOR}; color: white;">
-                    <th style="padding: 12px; text-align: left;">Time</th>
-                    <th style="padding: 12px; text-align: left;">Text</th>
-                    <th style="padding: 12px; text-align: left;">Words (Colors)</th>
-                </tr>
-            </thead>
-            <tbody>
-                {"".join(rows_html)}
-            </tbody>
-        </table>
-        <p style="margin-top: 20px; font-size: 14px; color: #666;">
-            To change word colors: Edit the JSON data below, change the "colors" array values (hex codes like #FF0000), then click "Update Preview".
-        </p>
+        <h3>Click on any word to change its color:</h3>
+        <div id="subtitle-editor">
+"""
+    
+    # Build interactive editor for each subtitle line
+    for line_idx, sub in enumerate(display_subs):
+        time_str = f"{sub['start']:.1f}s - {sub['end']:.1f}s"
+        
+        html += f"""
+        <div style="margin-bottom: 20px; padding: 15px; background: white; border-radius: 8px; border-left: 4px solid {BANNER_COLOR};">
+            <div style="color: #666; font-size: 12px; margin-bottom: 8px;">Line {line_idx + 1} | {time_str}</div>
+            <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+"""
+        
+        # Add each word with color picker
+        words = sub.get('words', [])
+        colors = sub.get('colors', [])
+        
+        for word_idx, word in enumerate(words):
+            word_text = word['text']
+            current_color = colors[word_idx] if word_idx < len(colors) else "#FFFFFF"
+            
+            html += f"""
+                <div style="display: flex; align-items: center; gap: 4px; background: #f9f9f9; padding: 6px 10px; border-radius: 4px;">
+                    <input type="color" 
+                           id="color_{line_idx}_{word_idx}" 
+                           value="{current_color}"
+                           style="width: 30px; height: 30px; border: none; cursor: pointer;"
+                           onchange="updateWordColor({line_idx}, {word_idx}, this.value)">
+                    <span style="font-size: 16px; padding: 0 4px;" id="word_{line_idx}_{word_idx}">{word_text}</span>
+                </div>
+"""
+        
+        html += """
+            </div>
+        </div>
+"""
+    
+    html += """
+        </div>
+        
+        <div style="margin-top: 20px; padding: 15px; background: #e3f2fd; border-radius: 8px;">
+            <h4 style="margin-top: 0;">Quick Color Presets:</h4>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <button onclick="applyPresetColor('#FF6B6B')" style="padding: 8px 15px; background: #FF6B6B; border: none; border-radius: 4px; cursor: pointer; color: white;">Feminine/Red</button>
+                <button onclick="applyPresetColor('#4ECDC4')" style="padding: 8px 15px; background: #4ECDC4; border: none; border-radius: 4px; cursor: pointer; color: white;">Masculine/Cyan</button>
+                <button onclick="applyPresetColor('#FFD93D')" style="padding: 8px 15px; background: #FFD93D; border: none; border-radius: 4px; cursor: pointer; color: black;">Verb/Yellow</button>
+                <button onclick="applyPresetColor('#95E1D3')" style="padding: 8px 15px; background: #95E1D3; border: none; border-radius: 4px; cursor: pointer; color: black;">Adjective/Green</button>
+                <button onclick="applyPresetColor('#F38181')" style="padding: 8px 15px; background: #F38181; border: none; border-radius: 4px; cursor: pointer; color: white;">Important/Pink</button>
+                <button onclick="applyPresetColor('#AA96DA')" style="padding: 8px 15px; background: #AA96DA; border: none; border-radius: 4px; cursor: pointer; color: white;">Conjugation/Purple</button>
+                <button onclick="applyPresetColor('#FFFFFF')" style="padding: 8px 15px; background: #FFFFFF; border: 2px solid #ccc; border-radius: 4px; cursor: pointer; color: black;">Reset/White</button>
+            </div>
+            <p style="font-size: 13px; color: #666; margin-top: 10px;">
+                Select words by clicking them, then click a preset color button. Or use the color picker next to each word.
+            </p>
+        </div>
+        
+        <input type="hidden" id="subtitle-data" value='""" + json.dumps(subtitles, ensure_ascii=False).replace("'", "\\'") + """'>
+        
+        <script>
+            let subtitleData = JSON.parse(document.getElementById('subtitle-data').value);
+            let selectedWords = new Set();
+            
+            // Update individual word color
+            function updateWordColor(lineIdx, wordIdx, color) {
+                if (lineIdx < subtitleData.length && wordIdx < subtitleData[lineIdx].colors.length) {
+                    subtitleData[lineIdx].colors[wordIdx] = color;
+                    
+                    // Update visual feedback
+                    const wordSpan = document.getElementById('word_' + lineIdx + '_' + wordIdx);
+                    if (wordSpan) {
+                        wordSpan.style.color = color;
+                        wordSpan.style.fontWeight = 'bold';
+                    }
+                    
+                    // Send data back to Python
+                    sendUpdateToPython();
+                }
+            }
+            
+            // Toggle word selection
+            function toggleWordSelection(lineIdx, wordIdx) {
+                const key = lineIdx + '_' + wordIdx;
+                const wordSpan = document.getElementById('word_' + lineIdx + '_' + wordIdx);
+                
+                if (selectedWords.has(key)) {
+                    selectedWords.delete(key);
+                    wordSpan.style.backgroundColor = 'transparent';
+                } else {
+                    selectedWords.add(key);
+                    wordSpan.style.backgroundColor = '#ffffcc';
+                }
+            }
+            
+            // Add click handlers to words
+            document.querySelectorAll('[id^="word_"]').forEach(span => {
+                span.style.cursor = 'pointer';
+                span.onclick = function() {
+                    const parts = this.id.split('_');
+                    toggleWordSelection(parseInt(parts[1]), parseInt(parts[2]));
+                };
+            });
+            
+            // Apply preset color to selected words
+            function applyPresetColor(color) {
+                if (selectedWords.size === 0) {
+                    alert('Please click on words to select them first!');
+                    return;
+                }
+                
+                selectedWords.forEach(key => {
+                    const [lineIdx, wordIdx] = key.split('_').map(Number);
+                    const colorPicker = document.getElementById('color_' + lineIdx + '_' + wordIdx);
+                    if (colorPicker) {
+                        colorPicker.value = color;
+                        updateWordColor(lineIdx, wordIdx, color);
+                    }
+                });
+                
+                // Clear selection
+                selectedWords.forEach(key => {
+                    const [lineIdx, wordIdx] = key.split('_').map(Number);
+                    const wordSpan = document.getElementById('word_' + lineIdx + '_' + wordIdx);
+                    if (wordSpan) {
+                        wordSpan.style.backgroundColor = 'transparent';
+                    }
+                });
+                selectedWords.clear();
+            }
+            
+            // Send updated data back to Python via Gradio
+            function sendUpdateToPython() {
+                // Store in hidden input for Gradio to pick up
+                document.getElementById('subtitle-data').value = JSON.stringify(subtitleData);
+                
+                // Trigger custom event that Gradio can listen to
+                window.parent.postMessage({
+                    type: 'subtitle_update',
+                    data: subtitleData
+                }, '*');
+            }
+        </script>
     </div>
     """
     
@@ -381,35 +487,12 @@ def create_app():
                 )
                 
                 gr.Markdown("""
-                **Color Editing (Simple Text Format):**
-                After transcription, you can edit word colors below. Format:
-                `line_number | word_index | color_hex`
-                
-                Example:
-                ```
-                1 | 0 | #FF0000    (Line 1, first word = red)
-                1 | 1 | #0000FF    (Line 1, second word = blue)
-                2 | 0 | #00FF00    (Line 2, first word = green)
-                ```
+                **How to edit colors:**
+                1. Each word has a color picker next to it - click to change color
+                2. OR click on words to select them (they highlight yellow)
+                3. Then click a preset color button to apply to all selected words
+                4. Colors save automatically when you export!
                 """)
-                
-                color_editor = gr.Textbox(
-                    label="Color Edits (one per line)",
-                    placeholder="1 | 0 | #FF0000\n2 | 1 | #0000FF",
-                    lines=10,
-                    interactive=True
-                )
-                
-                apply_colors_btn = gr.Button("Apply Color Changes")
-                
-                subtitle_json = gr.JSON(
-                    label="Full Subtitle Data (for advanced users - SLOW to load)",
-                    visible=False
-                )
-                
-                show_json_btn = gr.Button("Show Full JSON (Warning: May be slow)")
-                
-                update_preview_btn = gr.Button("Refresh Preview")
         
         with gr.Row():
             with gr.Column():
@@ -466,7 +549,7 @@ def create_app():
                 
                 yield f"Preview ready! Total: {len(subtitles)} lines", [], f"<div style='background:#f0f0f0; padding:10px;'>{preview_text}</div>", font_fam, font_sz
                 
-                editor = create_simple_editor(subtitles)
+                editor = create_interactive_editor(subtitles)
                 print("[DEBUG] HTML preview created")
                 
                 success = f"Done! Created {len(subtitles)} subtitle lines from {len(word_segments)} words."
@@ -483,13 +566,13 @@ def create_app():
         def update_preview(subtitles):
             if not subtitles:
                 return "<p>No subtitles to preview</p>"
-            editor = create_simple_editor(subtitles)
+            editor = create_interactive_editor(subtitles)
             return editor
         
         def apply_color_edits(color_text, subtitles):
             """Apply color edits from simple text format"""
             if not subtitles or not color_text:
-                return subtitles, create_simple_editor(subtitles) if subtitles else "<p>No data</p>"
+                return subtitles, create_interactive_editor(subtitles) if subtitles else "<p>No data</p>"
             
             # Parse the text edits
             lines = color_text.strip().split('\n')
@@ -523,7 +606,7 @@ def create_app():
                     continue
             
             # Update preview
-            editor = create_simple_editor(subtitles)
+            editor = create_interactive_editor(subtitles)
             return subtitles, editor
         
         def do_export_srt(subtitles):
@@ -549,15 +632,6 @@ def create_app():
         
         update_preview_btn.click(
             fn=update_preview,
-            inputs=[subtitles_state],
-            outputs=[editor_html]
-        )
-        
-        apply_colors_btn.click(
-            fn=apply_color_edits,
-            inputs=[color_editor, subtitles_state],
-            outputs=[subtitles_state, editor_html]
-        )
         
         export_srt_btn.click(
             fn=do_export_srt,
@@ -569,20 +643,6 @@ def create_app():
             fn=do_export_ass,
             inputs=[subtitles_state, font_family_state, font_size_state],
             outputs=[ass_file]
-        )
-        
-        # Toggle JSON visibility
-        show_json_btn.click(
-            fn=lambda: gr.update(visible=True),
-            inputs=[],
-            outputs=[subtitle_json]
-        )
-        
-        # Sync JSON with state
-        subtitles_state.change(
-            fn=lambda x: x,
-            inputs=[subtitles_state],
-            outputs=[subtitle_json]
         )
     
     return app
