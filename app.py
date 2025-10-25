@@ -1,12 +1,13 @@
 # Language Learning Subtitle Editor
-# Version 1.6 - Interactive Dataframe Editor
-# Banner Color: #FF6F00 (Deep Orange)
+# Version 2.0 - External Editor Workflow
+# Banner Color: #00BCD4 (Cyan)
 
 import os
 import re
 import tempfile
 from typing import List, Tuple
-import pandas as pd
+from html import unescape
+import zipfile
 
 import gradio as gr
 import torch
@@ -15,26 +16,14 @@ import whisperx
 
 # -------------------------- Config --------------------------
 
-VERSION = "1.6"
-BANNER_COLOR = "#FF6F00"  # Deep Orange for v1.6
+VERSION = "2.0"
+BANNER_COLOR = "#00BCD4"  # Cyan for v2.0
 
 LANG_MAP = {
     "auto": None, "auto-detect": None, "automatic": None,
     "hungarian": "hu", "magyar": "hu", "hun": "hu",
     "spanish": "es", "español": "es", "esp": "es",
     "english": "en", "eng": "en",
-}
-
-# Preset colors with names
-COLOR_PRESETS = {
-    "White": "#FFFFFF",
-    "Black": "#000000",
-    "Feminine/Red": "#FF6B6B",
-    "Masculine/Cyan": "#4ECDC4",
-    "Verb/Yellow": "#FFD93D",
-    "Adjective/Green": "#95E1D3",
-    "Important/Pink": "#F38181",
-    "Conjugation/Purple": "#AA96DA",
 }
 
 
@@ -51,7 +40,7 @@ def normalize_lang(s: str | None):
 
 
 def seconds_to_timestamp(t: float) -> str:
-    """Convert seconds to SRT timestamp format"""
+    """Convert seconds to SRT/ASS timestamp format"""
     t = max(t, 0.0)
     h = int(t // 3600)
     t -= h * 3600
@@ -92,7 +81,7 @@ def get_asr_model():
 
 # -------------------------- Transcription --------------------------
 
-def transcribe_with_words(audio_path: str, language_code: str | None) -> Tuple[List[dict], float]:
+def transcribe_with_words(audio_path: str, language_code: str | None) -> List[dict]:
     """Transcribe and return word-level timestamps"""
     model = get_asr_model()
     
@@ -100,10 +89,7 @@ def transcribe_with_words(audio_path: str, language_code: str | None) -> Tuple[L
     result = model.transcribe(audio_path, language=language_code)
     segments = result["segments"]
     
-    duration = 0.0
-    if segments:
-        duration = max(duration, float(segments[-1]["end"]))
-    
+    # Extract words with timestamps
     word_segments = []
     for seg in segments:
         if "words" in seg and seg["words"]:
@@ -114,6 +100,7 @@ def transcribe_with_words(audio_path: str, language_code: str | None) -> Tuple[L
                     "text": w.get("word", w.get("text", "")).strip(),
                 })
         else:
+            # Fallback: split by spaces
             text = seg["text"].strip()
             words = text.split()
             if words:
@@ -132,153 +119,216 @@ def transcribe_with_words(audio_path: str, language_code: str | None) -> Tuple[L
                     })
     
     print(f"Got {len(word_segments)} words")
-    return word_segments, duration
+    return word_segments
 
 
-def group_words_into_subtitles(word_segments: List[dict], words_per_line: int = 5) -> List[dict]:
-    """Group words into subtitle lines"""
-    print(f"Grouping {len(word_segments)} words...")
+# -------------------------- DOCX Export for External Editing --------------------------
+
+def export_to_docx_for_editing(word_segments: List[dict]) -> str:
+    """Export words to a DOCX file that can be edited in Word/Google Docs"""
+    from docx import Document
+    from docx.shared import RGBColor, Pt
     
-    if not word_segments:
-        return []
+    doc = Document()
     
-    subtitles = []
-    i = 0
+    # Add title
+    title = doc.add_heading('Edit Your Subtitles', 0)
     
-    while i < len(word_segments):
-        chunk = word_segments[i:i + words_per_line]
-        if not chunk:
-            break
-        
-        sub_start = chunk[0]["start"]
-        sub_end = chunk[-1]["end"]
-        sub_text = " ".join(w["text"] for w in chunk)
-        
-        colors = ["White"] * len(chunk)
-        
-        subtitles.append({
-            "start": round(sub_start, 3),
-            "end": round(sub_end, 3),
-            "text": sub_text,
-            "words": chunk,
-            "colors": colors
-        })
-        
-        i += words_per_line
+    # Instructions
+    instructions = doc.add_paragraph()
+    instructions.add_run('INSTRUCTIONS:\n').bold = True
+    instructions.add_run(
+        '1. Edit the text below (fix typos, change words)\n'
+        '2. Use the color highlighting tools in Word/Google Docs to color words\n'
+        '3. Save this file\n'
+        '4. Upload it back to the app\n'
+        '5. The app will preserve your text edits and colors!\n\n'
+    )
     
-    print(f"Created {len(subtitles)} subtitle lines")
-    return subtitles
+    instructions.add_run('Color Guide:\n').bold = True
+    instructions.add_run(
+        '• Red = Highlight important words\n'
+        '• Yellow = Highlight verbs\n'
+        '• Cyan/Blue = Highlight nouns\n'
+        '• Green = Highlight adjectives\n'
+        '• Purple = Highlight endings/conjugations\n'
+        '• Or use any colors you want!\n\n'
+    )
+    
+    # Add separator
+    doc.add_paragraph('─' * 80)
+    
+    # Add all words as a continuous paragraph
+    para = doc.add_paragraph()
+    for word_info in word_segments:
+        word_text = word_info['text']
+        run = para.add_run(word_text + ' ')
+        run.font.size = Pt(14)
+    
+    # Save to temp file
+    temp_dir = tempfile.mkdtemp()
+    docx_path = os.path.join(temp_dir, "subtitles_for_editing.docx")
+    doc.save(docx_path)
+    
+    return docx_path
 
 
-# -------------------------- Create DataFrame for Editing --------------------------
+# -------------------------- Import DOCX with Colors --------------------------
 
-def subtitles_to_dataframe(subtitles: List[dict]) -> pd.DataFrame:
-    """Convert subtitles to a DataFrame for editing"""
-    rows = []
+def import_from_docx(docx_path: str, original_words: List[dict]) -> List[dict]:
+    """Import edited DOCX and extract text + colors"""
+    from docx import Document
+    from docx.shared import RGBColor
     
-    for line_idx, sub in enumerate(subtitles):
-        words = sub.get('words', [])
-        colors = sub.get('colors', [])
-        
-        for word_idx, word in enumerate(words):
-            rows.append({
-                'Line': line_idx + 1,
-                'Word#': word_idx,
-                'Word': word['text'],
-                'Color': colors[word_idx] if word_idx < len(colors) else "White",
-                'Start': round(word['start'], 2),
-                'End': round(word['end'], 2)
+    doc = Document(docx_path)
+    
+    # Extract words with their colors
+    edited_words = []
+    
+    for para in doc.paragraphs:
+        for run in para.runs:
+            text = run.text.strip()
+            if not text:
+                continue
+            
+            # Split by spaces
+            words = text.split()
+            
+            for word in words:
+                if not word:
+                    continue
+                
+                # Get color (from highlight or font color)
+                color = "#FFFFFF"  # Default white
+                
+                # Check highlight color
+                if run.font.highlight_color:
+                    # Map Word highlight colors to hex
+                    highlight_map = {
+                        1: "#FFFF00",  # Yellow
+                        2: "#00FF00",  # Bright Green
+                        3: "#00FFFF",  # Turquoise/Cyan
+                        4: "#FF00FF",  # Pink
+                        5: "#0000FF",  # Blue
+                        6: "#FF0000",  # Red
+                        7: "#800000",  # Dark Red
+                        9: "#008000",  # Dark Green
+                        11: "#008080",  # Teal
+                        12: "#000080",  # Dark Blue
+                        13: "#800080",  # Violet/Purple
+                    }
+                    color = highlight_map.get(run.font.highlight_color, "#FFFF00")
+                
+                # Or check font color
+                elif run.font.color and run.font.color.rgb:
+                    rgb = run.font.color.rgb
+                    color = f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
+                
+                edited_words.append({
+                    "text": word,
+                    "color": color
+                })
+    
+    # Match edited words back to timestamps
+    # We'll try to align by position
+    result = []
+    
+    for i, orig_word in enumerate(original_words):
+        if i < len(edited_words):
+            result.append({
+                "start": orig_word["start"],
+                "end": orig_word["end"],
+                "text": edited_words[i]["text"],
+                "color": edited_words[i]["color"]
+            })
+        else:
+            # Keep original if edited is shorter
+            result.append({
+                "start": orig_word["start"],
+                "end": orig_word["end"],
+                "text": orig_word["text"],
+                "color": "#FFFFFF"
             })
     
-    return pd.DataFrame(rows)
+    return result
 
 
-def dataframe_to_subtitles(df: pd.DataFrame, original_subtitles: List[dict]) -> List[dict]:
-    """Convert edited DataFrame back to subtitles"""
-    # Create a copy of original subtitles
-    import copy
-    subtitles = copy.deepcopy(original_subtitles)
-    
-    # Update colors and text from dataframe
-    for _, row in df.iterrows():
-        line_num = int(row['Line']) - 1
-        word_idx = int(row['Word#'])
-        
-        if line_num < len(subtitles):
-            # Update word text
-            if word_idx < len(subtitles[line_num]['words']):
-                subtitles[line_num]['words'][word_idx]['text'] = str(row['Word'])
-            
-            # Update color
-            if word_idx < len(subtitles[line_num]['colors']):
-                subtitles[line_num]['colors'][word_idx] = str(row['Color'])
-    
-    # Rebuild full text for each line
-    for sub in subtitles:
-        sub['text'] = " ".join(w['text'] for w in sub['words'])
-    
-    return subtitles
+# -------------------------- Export ASS --------------------------
 
-
-# -------------------------- Export --------------------------
-
-def export_to_srt(subtitles: List[dict]) -> str:
-    """Export to SRT format"""
-    lines = []
-    for i, sub in enumerate(subtitles, 1):
-        start = seconds_to_timestamp(sub["start"])
-        end = seconds_to_timestamp(sub["end"])
-        text = sub["text"]
-        lines.append(f"{i}\n{start} --> {end}\n{text}\n")
-    return "\n".join(lines)
-
-
-def export_to_ass_with_colors(subtitles: List[dict], video_w: int = 1280, video_h: int = 720,
-                               default_font: str = "Arial", default_size: int = 36) -> str:
-    """Export to ASS with word colors"""
+def export_to_ass(words: List[dict], words_per_line: int = 5, 
+                  font: str = "Arial", size: int = 36) -> str:
+    """Export to ASS format with colors"""
     
     header = f"""[Script Info]
 ScriptType: v4.00+
-PlayResX: {video_w}
-PlayResY: {video_h}
+PlayResX: 1280
+PlayResY: 720
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{default_font},{default_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,30,30,30,1
+Style: Default,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,30,30,30,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     
+    # Group words into subtitle lines
     events = []
-    for sub in subtitles:
-        start = seconds_to_timestamp(sub["start"]).replace(",", ".")
-        end = seconds_to_timestamp(sub["end"]).replace(",", ".")
+    i = 0
+    
+    while i < len(words):
+        chunk = words[i:i + words_per_line]
+        if not chunk:
+            break
         
+        start = seconds_to_timestamp(chunk[0]["start"]).replace(",", ".")
+        end = seconds_to_timestamp(chunk[-1]["end"]).replace(",", ".")
+        
+        # Build colored text
         text_parts = []
-        words = sub.get("words", [])
-        colors = sub.get("colors", [])
-        
-        for i, word_info in enumerate(words):
+        for word_info in chunk:
             word_text = word_info["text"]
-            color_name = colors[i] if i < len(colors) else "White"
-            color_hex = COLOR_PRESETS.get(color_name, "#FFFFFF")
+            color_hex = word_info.get("color", "#FFFFFF")
             
             if color_hex.startswith("#"):
                 color_hex = color_hex[1:]
             
-            r = int(color_hex[0:2], 16)
-            g = int(color_hex[2:4], 16)
-            b = int(color_hex[4:6], 16)
+            r = int(color_hex[0:2], 16) if len(color_hex) >= 2 else 255
+            g = int(color_hex[2:4], 16) if len(color_hex) >= 4 else 255
+            b = int(color_hex[4:6], 16) if len(color_hex) >= 6 else 255
             
             ass_color = f"&H00{b:02X}{g:02X}{r:02X}"
             text_parts.append(f"{{\\c{ass_color}}}{word_text}")
         
         colored_text = " ".join(text_parts)
         events.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{colored_text}")
+        
+        i += words_per_line
     
     return header + "\n".join(events) + "\n"
+
+
+def export_to_srt(words: List[dict], words_per_line: int = 5) -> str:
+    """Export to SRT format (no colors)"""
+    lines = []
+    i = 0
+    subtitle_num = 1
+    
+    while i < len(words):
+        chunk = words[i:i + words_per_line]
+        if not chunk:
+            break
+        
+        start = seconds_to_timestamp(chunk[0]["start"])
+        end = seconds_to_timestamp(chunk[-1]["end"])
+        text = " ".join(w["text"] for w in chunk)
+        
+        lines.append(f"{subtitle_num}\n{start} --> {end}\n{text}\n")
+        subtitle_num += 1
+        i += words_per_line
+    
+    return "\n".join(lines)
 
 
 def save_file(content: str, extension: str) -> str:
@@ -301,26 +351,30 @@ def create_app():
         gr.HTML(f"""
         <div style="background: {BANNER_COLOR}; color: white; padding: 20px; text-align: center; border-radius: 8px; margin-bottom: 20px;">
             <h1 style="margin: 0;">Language Learning Subtitle Editor</h1>
-            <p style="margin: 5px 0 0 0;">Version {VERSION} - Edit Like a Spreadsheet!</p>
+            <p style="margin: 5px 0 0 0;">Version {VERSION} - Edit in YOUR Word Processor!</p>
         </div>
         """)
         
         gr.Markdown("""
-        ## How to use:
-        1. Upload audio and transcribe
-        2. Edit the table below - change words, change colors
-        3. Click "Update Subtitles" to save changes
-        4. Export SRT or ASS files
+        ## How it works:
+        1. **Transcribe** your audio
+        2. **Download DOCX** file
+        3. **Edit in Word/Google Docs** - Fix text, add colors with highlighter
+        4. **Upload back** your edited file
+        5. **Export ASS** with your colors!
+        
+        **No more fighting with web editors - use the tools you know!**
         """)
         
         # State
-        subtitles_state = gr.State([])
+        word_segments_state = gr.State([])
+        edited_words_state = gr.State([])
         
         with gr.Row():
-            with gr.Column(scale=1):
-                gr.Markdown("### Step 1: Upload and Transcribe")
+            with gr.Column():
+                gr.Markdown("### Step 1: Transcribe Audio")
                 
-                audio_input = gr.Audio(label="Upload Audio or Video", type="filepath")
+                audio_input = gr.Audio(label="Upload Audio/Video", type="filepath")
                 
                 language_dropdown = gr.Dropdown(
                     choices=[
@@ -333,19 +387,68 @@ def create_app():
                     label="Language"
                 )
                 
-                words_per_line = gr.Slider(
-                    minimum=2,
-                    maximum=10,
-                    value=5,
-                    step=1,
-                    label="Words per subtitle line"
+                transcribe_btn = gr.Button("Transcribe", variant="primary", size="lg")
+                
+                status_text = gr.Textbox(
+                    label="Status",
+                    value="Ready to transcribe...",
+                    interactive=False,
+                    lines=3
                 )
                 
+                transcript_preview = gr.Textbox(
+                    label="Transcript Preview",
+                    lines=10,
+                    interactive=False
+                )
+        
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### Step 2: Download for Editing")
+                
+                download_docx_btn = gr.Button("Download DOCX for Editing", size="lg")
+                docx_file = gr.File(label="Download this file, edit it in Word/Google Docs")
+                
+                gr.Markdown("""
+                **In Word/Google Docs:**
+                - Fix any transcription errors
+                - Use the **Highlight** tool to color words
+                - Yellow = Verbs, Red = Important, Cyan = Nouns, etc.
+                - Save the file
+                """)
+        
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### Step 3: Upload Edited File")
+                
+                upload_docx = gr.File(label="Upload your edited DOCX", file_types=[".docx"])
+                
+                import_btn = gr.Button("Import Edited File", variant="primary", size="lg")
+                
+                import_status = gr.Textbox(
+                    label="Import Status",
+                    value="",
+                    interactive=False,
+                    lines=2
+                )
+        
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### Step 4: Export Subtitles")
+                
                 with gr.Row():
+                    words_per_line = gr.Slider(
+                        minimum=2,
+                        maximum=10,
+                        value=5,
+                        step=1,
+                        label="Words per subtitle line"
+                    )
+                    
                     font_family = gr.Dropdown(
                         choices=["Arial", "Times New Roman", "Courier New", "Georgia", "Verdana"],
                         value="Arial",
-                        label="Font (for export)"
+                        label="Font"
                     )
                     
                     font_size = gr.Slider(
@@ -353,127 +456,115 @@ def create_app():
                         maximum=72,
                         value=36,
                         step=2,
-                        label="Size (for export)"
+                        label="Size"
                     )
                 
-                transcribe_btn = gr.Button("Transcribe", variant="primary", size="lg")
-                
-                status_text = gr.Textbox(
-                    label="Status",
-                    value="Ready...",
-                    interactive=False
-                )
-        
-        with gr.Row():
-            with gr.Column():
-                gr.Markdown("### Step 2: Edit Subtitles")
-                
-                gr.Markdown("""
-                **Edit the table:**
-                - Click any cell to edit
-                - Change Word column to fix transcription errors
-                - Change Color column using dropdown (click the cell!)
-                - Available colors: White, Black, Feminine/Red, Masculine/Cyan, Verb/Yellow, Adjective/Green, Important/Pink, Conjugation/Purple
-                """)
-                
-                editor_df = gr.Dataframe(
-                    headers=["Line", "Word#", "Word", "Color", "Start", "End"],
-                    datatype=["number", "number", "str", "str", "number", "number"],
-                    col_count=(6, "fixed"),
-                    row_count=(10, "dynamic"),
-                    interactive=True,
-                    wrap=True
-                )
-                
-                update_btn = gr.Button("Update Subtitles from Table", variant="primary", size="lg")
-        
-        with gr.Row():
-            with gr.Column():
-                gr.Markdown("### Step 3: Export")
-                
                 with gr.Row():
-                    export_srt_btn = gr.Button("Export SRT")
-                    export_ass_btn = gr.Button("Export ASS (with colors)")
+                    export_srt_btn = gr.Button("Export SRT (no colors)")
+                    export_ass_btn = gr.Button("Export ASS (with colors)", variant="primary")
                 
                 srt_file = gr.File(label="SRT File")
                 ass_file = gr.File(label="ASS File")
         
         # Events
         
-        def do_transcribe(audio_path, language, words_per):
+        def do_transcribe(audio_path, language):
             if not audio_path:
-                return "Error: No audio file", [], pd.DataFrame()
+                return "Error: No audio file", [], ""
             
             try:
-                yield "Loading AI model...", [], pd.DataFrame()
+                yield "Loading AI model...", [], ""
                 
                 lang_code = normalize_lang(language)
                 
-                yield "Transcribing...", [], pd.DataFrame()
+                yield "Transcribing... this may take a minute...", [], ""
                 
-                word_segments, duration = transcribe_with_words(audio_path, lang_code)
+                word_segments = transcribe_with_words(audio_path, lang_code)
                 
-                yield f"Grouping {len(word_segments)} words...", [], pd.DataFrame()
+                # Create preview
+                preview_text = " ".join(w["text"] for w in word_segments)
                 
-                subtitles = group_words_into_subtitles(word_segments, int(words_per))
+                success = f"✅ Done! Got {len(word_segments)} words.\n\nNow click 'Download DOCX for Editing' below."
                 
-                df = subtitles_to_dataframe(subtitles)
-                
-                success = f"Done! {len(subtitles)} lines, {len(df)} words. Edit the table below!"
-                
-                return success, subtitles, df
+                return success, word_segments, preview_text
                 
             except Exception as e:
-                error_msg = f"Error: {str(e)}"
-                return error_msg, [], pd.DataFrame()
+                error_msg = f"❌ Error: {str(e)}"
+                return error_msg, [], ""
         
-        def update_from_dataframe(df_data, original_subs):
-            if df_data is None or len(df_data) == 0:
-                return original_subs, "No data to update"
+        def do_download_docx(word_segments):
+            if not word_segments:
+                gr.Warning("Transcribe first!")
+                return None
             
             try:
-                df = pd.DataFrame(df_data)
-                updated_subs = dataframe_to_subtitles(df, original_subs)
-                return updated_subs, "Subtitles updated! You can now export."
+                docx_path = export_to_docx_for_editing(word_segments)
+                return docx_path
             except Exception as e:
-                return original_subs, f"Error updating: {str(e)}"
-        
-        def do_export_srt(subtitles):
-            if not subtitles:
-                gr.Warning("No subtitles. Transcribe first.")
+                gr.Warning(f"Error creating DOCX: {str(e)}")
                 return None
-            srt_content = export_to_srt(subtitles)
+        
+        def do_import_docx(uploaded_file, original_words):
+            if not uploaded_file:
+                return [], "No file uploaded"
+            
+            if not original_words:
+                return [], "Transcribe first!"
+            
+            try:
+                edited_words = import_from_docx(uploaded_file.name, original_words)
+                preview = " ".join(w["text"] for w in edited_words[:50])
+                if len(edited_words) > 50:
+                    preview += "..."
+                
+                return edited_words, f"✅ Imported {len(edited_words)} words!\n\nPreview: {preview}"
+            except Exception as e:
+                return [], f"❌ Error importing: {str(e)}"
+        
+        def do_export_srt(words, words_per):
+            if not words:
+                gr.Warning("Import edited file first!")
+                return None
+            
+            srt_content = export_to_srt(words, int(words_per))
             return save_file(srt_content, ".srt")
         
-        def do_export_ass(subtitles, font_fam, font_sz):
-            if not subtitles:
-                gr.Warning("No subtitles. Transcribe first.")
+        def do_export_ass(words, words_per, font, size):
+            if not words:
+                gr.Warning("Import edited file first!")
                 return None
-            ass_content = export_to_ass_with_colors(subtitles, default_font=font_fam, default_size=int(font_sz))
+            
+            ass_content = export_to_ass(words, int(words_per), font, int(size))
             return save_file(ass_content, ".ass")
         
-        # Connect
+        # Connect events
         transcribe_btn.click(
             fn=do_transcribe,
-            inputs=[audio_input, language_dropdown, words_per_line],
-            outputs=[status_text, subtitles_state, editor_df]
+            inputs=[audio_input, language_dropdown],
+            outputs=[status_text, word_segments_state, transcript_preview]
         )
         
-        update_btn.click(
-            fn=update_from_dataframe,
-            inputs=[editor_df, subtitles_state],
-            outputs=[subtitles_state, status_text]
+        download_docx_btn.click(
+            fn=do_download_docx,
+            inputs=[word_segments_state],
+            outputs=[docx_file]
+        )
+        
+        import_btn.click(
+            fn=do_import_docx,
+            inputs=[upload_docx, word_segments_state],
+            outputs=[edited_words_state, import_status]
         )
         
         export_srt_btn.click(
             fn=do_export_srt,
-            inputs=[subtitles_state],
+            inputs=[edited_words_state, words_per_line],
             outputs=[srt_file]
         )
         
         export_ass_btn.click(
             fn=do_export_ass,
-            inputs=[subtitles_state, font_family, font_size],
+            inputs=[edited_words_state, words_per_line, font_family, font_size],
             outputs=[ass_file]
         )
     
