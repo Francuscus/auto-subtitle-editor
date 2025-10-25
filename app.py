@@ -16,8 +16,8 @@ import whisperx
 
 # -------------------------- Config --------------------------
 
-VERSION = "1.3"
-BANNER_COLOR = "#9C27B0"  # Purple for v1.3
+VERSION = "1.4"
+BANNER_COLOR = "#00897B"  # Teal for v1.4
 
 LANG_MAP = {
     "auto": None, "auto-detect": None, "automatic": None,
