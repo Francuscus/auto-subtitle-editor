@@ -1,5 +1,6 @@
 # Language Learning Subtitle Editor
 # Version 2.2 — External Editor Workflow + Popup-style HTML generator (Gradio 4.x)
+# NOTE: This build is identical to your v2.2 except it adds ZIP-HTML import support.
 
 import os
 import re
@@ -249,6 +250,22 @@ def import_from_html(html_path: str, original_words: List[dict]) -> List[dict]:
             edited.append({"start": ow["start"], "end": ow["end"], "text": ow["text"], "color": DEFAULT_SAMPLE_TEXT_COLOR})
     return edited
 
+# ---- ZIP support: read the first .html/.htm inside a Google Docs zip ----
+
+def extract_first_html_from_zip(zip_path: str) -> Optional[str]:
+    import zipfile
+    if not zipfile.is_zipfile(zip_path):
+        return None
+    tmpdir = tempfile.mkdtemp()
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        # Prefer files in root or "word/document.html"-style paths
+        html_members = [m for m in zf.namelist() if m.lower().endswith(('.html', '.htm'))]
+        if not html_members:
+            return None
+        member = html_members[0]
+        zf.extract(member, tmpdir)
+        return os.path.join(tmpdir, member)
+
 # -------------------------- SubRip (SRT) / ASS --------------------------
 
 def export_to_srt(words: List[dict], words_per_line: int = 5) -> str:
@@ -359,7 +376,11 @@ def create_app():
         with gr.Row():
             with gr.Column():
                 gr.Markdown("### 3) Upload Edited HTML")
-                upload_html = gr.File(label="Upload your edited HTML", file_types=[".html", ".htm"])
+                # Only change here: accept .zip as well.
+                upload_html = gr.File(
+                    label="Upload your edited HTML (or a Google Docs .zip export)",
+                    file_types=[".html", ".htm", ".zip"]
+                )
                 import_btn = gr.Button("Import Edited HTML", variant="primary", size="lg")
                 import_status = gr.Textbox(label="Import Status", interactive=False, lines=3)
 
@@ -432,7 +453,18 @@ def create_app():
             if not original_words:
                 return "❌ Transcribe first.", []
             try:
-                edited = import_from_html(file.name, original_words)
+                src_path = file.name
+                chosen_html = None
+
+                # If it's a ZIP, extract first .html/.htm
+                if src_path.lower().endswith(".zip"):
+                    chosen_html = extract_first_html_from_zip(src_path)
+                    if not chosen_html:
+                        return "❌ ZIP did not contain an .html/.htm file.", []
+                else:
+                    chosen_html = src_path
+
+                edited = import_from_html(chosen_html, original_words)
                 return f"✅ Imported {len(edited)} words with colors.", edited
             except Exception as e:
                 return f"❌ Error importing HTML: {e}", []
