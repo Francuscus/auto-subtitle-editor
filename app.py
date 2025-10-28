@@ -1,6 +1,6 @@
 # Language Learning Subtitle Editor
-# Version 3.1 — Auto Spanish Verb Coloring (Paco's Grammar)
-# Banner Color: #8E44AD (Royal Purple)
+# Version 3.2 — Verb Detection Gates (No More False Positives!)
+# Banner Color: #E67E22 (Carrot Orange)
 
 import os
 import re
@@ -17,8 +17,8 @@ import whisperx
 
 # -------------------------- Config --------------------------
 
-VERSION = "3.1"
-BANNER_COLOR = "#8E44AD"  # Royal Purple banner
+VERSION = "3.2"
+BANNER_COLOR = "#E67E22"  # Carrot Orange banner
 DEFAULT_SAMPLE_TEXT_COLOR = "#1e88e5"  # Blue so it isn't white-on-white
 
 LANG_MAP = {
@@ -343,6 +343,7 @@ def transcribe_to_ipa_internal(text, dialect='dominican'):
 
 # -------------------------- Spanish Verb Coloring (Paco Grammar) --------------------------
 # Automatically colors person-marking endings in Spanish verbs
+# Uses linguistic gates to distinguish verbs from non-verbs
 
 # Person marker colors (matching the prompt requirements)
 PERSON_COLORS = {
@@ -354,189 +355,273 @@ PERSON_COLORS = {
     'shared': '#FFA500'        # 🟠 orange (yo = él/ella/usted)
 }
 
-def identify_verb_ending(word):
+# Disqualifiers - words that indicate the following word is NOT a verb
+ARTICLES = {'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas'}
+DETERMINERS = {'este', 'esta', 'estos', 'estas', 'ese', 'esa', 'esos', 'esas',
+               'aquel', 'aquella', 'aquellos', 'aquellas', 'mi', 'tu', 'su',
+               'mis', 'tus', 'sus', 'nuestro', 'nuestra', 'nuestros', 'nuestras',
+               'vuestro', 'vuestra', 'vuestros', 'vuestras', 'lo', 'al', 'del'}
+PREPOSITIONS = {'de', 'a', 'en', 'con', 'por', 'para', 'sin', 'sobre', 'tras',
+                'desde', 'hasta', 'hacia', 'entre', 'durante', 'mediante'}
+
+# Context clues that boost verb hypothesis
+SUBJECT_PRONOUNS = {'yo', 'tú', 'él', 'ella', 'usted', 'nosotros', 'nosotras',
+                    'vosotros', 'vosotras', 'ellos', 'ellas', 'ustedes'}
+NEGATIONS = {'no', 'nunca', 'jamás', 'tampoco'}
+QUESTION_WORDS = {'qué', 'quién', 'quiénes', 'cómo', 'cuándo', 'dónde',
+                  'cuál', 'cuáles', 'cuánto', 'cuánta', 'cuántos', 'cuántas'}
+
+# Common auxiliary verbs (always considered verbs when conjugated)
+AUXILIARIES = {
+    # estar
+    'estoy', 'estás', 'está', 'estamos', 'estáis', 'están',
+    # ir
+    'voy', 'vas', 'va', 'vamos', 'vais', 'van',
+    # haber
+    'he', 'has', 'ha', 'hemos', 'habéis', 'han',
+    'había', 'habías', 'habíamos', 'habíais', 'habían',
+    'hube', 'hubiste', 'hubo', 'hubimos', 'hubisteis', 'hubieron',
+    'habré', 'habrás', 'habrá', 'habremos', 'habréis', 'habrán',
+    # ser
+    'soy', 'eres', 'es', 'somos', 'sois', 'son',
+    'era', 'eras', 'éramos', 'erais', 'eran',
+    'fui', 'fuiste', 'fue', 'fuimos', 'fuisteis', 'fueron'
+}
+
+
+def passes_verb_gate(word, prev_word=None, next_word=None, is_first=False):
     """
-    Identify Spanish verb endings and return (stem, ending, person, color)
-    Returns None if not a recognized verb form
+    Phase 1: Verb Detection Gate
+    Returns True only if word passes as a potential verb (not a noun/adjective/etc.)
+    """
+    word_lower = word.lower()
+    prev_lower = prev_word.lower() if prev_word else None
+
+    # DISQUALIFIERS (fail immediately)
+    # 1. Preceded by article/determiner → likely noun
+    if prev_lower and (prev_lower in ARTICLES or prev_lower in DETERMINERS):
+        return False
+
+    # 2. Ends with -mente → adverb
+    if word_lower.endswith('mente'):
+        return False
+
+    # 3. Infinitives -ar/-er/-ir (don't color them)
+    if word_lower.endswith(('ar', 'er', 'ir')) and len(word_lower) > 3:
+        return False
+
+    # AUXILIARIES (always pass)
+    if word_lower in AUXILIARIES:
+        return True
+
+    # CONJUGATED FORM PATTERNS
+    # Must match a known conjugation pattern
+    has_verb_ending = False
+
+    # Preterite: -é, -aste, -ó, -aron, -ieron
+    if word_lower.endswith(('é', 'ó', 'aste', 'aron', 'iste', 'ió', 'ieron')):
+        has_verb_ending = True
+
+    # Imperfect: -aba, -abas, -ábamos, -aban, -ía, -ías, -íamos, -ían
+    elif word_lower.endswith(('aba', 'abas', 'ábamos', 'aban', 'ía', 'ías', 'íamos', 'ían')):
+        has_verb_ending = True
+
+    # Future/Conditional: -rás, -rá, -remos, -rán, -ría
+    elif word_lower.endswith(('rás', 'rá', 'remos', 'rán', 'ría', 'rías', 'ríamos', 'rían')):
+        has_verb_ending = True
+
+    # Present: -mos, -s, -n, -o, -a, -e (but be careful with these)
+    elif word_lower.endswith(('amos', 'emos', 'imos')) and len(word_lower) >= 5:
+        has_verb_ending = True
+    elif word_lower.endswith(('as', 'es')) and len(word_lower) >= 4:
+        has_verb_ending = True
+    elif word_lower.endswith(('an', 'en')) and len(word_lower) >= 4:
+        has_verb_ending = True
+    elif word_lower.endswith('o') and len(word_lower) >= 4:
+        # "hablo", "como" YES, but "yo", "no", "como" (noun) need context
+        has_verb_ending = True
+    elif word_lower.endswith(('a', 'e')) and len(word_lower) >= 4:
+        # "habla", "come" YES, but "casa", "clase" need checking
+        # Only pass if we have positive context
+        has_verb_ending = False  # Will check context below
+
+    if not has_verb_ending:
+        return False
+
+    # SYNTACTIC CONTEXT (boost confidence)
+    # Following subject pronoun → definitely verb
+    if prev_lower and prev_lower in SUBJECT_PRONOUNS:
+        return True
+
+    # Following negation → definitely verb
+    if prev_lower and prev_lower in NEGATIONS:
+        return True
+
+    # First word in sentence with strong verb ending → likely verb
+    if is_first and word_lower.endswith(('é', 'ó', 'aba', 'ía', 'amos', 'emos')):
+        return True
+
+    # If we got here, it matched a verb ending pattern
+    return True
+
+def identify_verb_ending_gated(word):
+    """
+    Returns (stem, ending, person, color) for a verified verb
+    Only called AFTER word passes verb gate
     """
     word_lower = word.lower()
 
-    # Special case: present perfect (haber forms)
-    # h + e/as/a/emos/an (never color the 'h', only what follows)
-    if word_lower.startswith('h') and len(word_lower) >= 2:
+    # Haber: h + e/as/a/emos/an (color only after h)
+    if word_lower in ['he', 'has', 'ha', 'hemos', 'han']:
         rest = word_lower[1:]
         if rest == 'e':
-            return (word[:1], word[1:], 'yo', PERSON_COLORS['yo'])
+            return ('h', 'e', 'yo', PERSON_COLORS['yo'])
         elif rest == 'as':
-            return (word[:1], word[1:], 'tu', PERSON_COLORS['tu'])
+            return ('h', 'as', 'tu', PERSON_COLORS['tu'])
         elif rest == 'a':
-            return (word[:1], word[1:], 'el', PERSON_COLORS['el'])
+            return ('h', 'a', 'el', PERSON_COLORS['el'])
         elif rest == 'emos':
-            return (word[:1], word[1:], 'nosotros', PERSON_COLORS['nosotros'])
+            return ('h', 'emos', 'nosotros', PERSON_COLORS['nosotros'])
         elif rest == 'an':
-            return (word[:1], word[1:], 'ellos', PERSON_COLORS['ellos'])
+            return ('h', 'an', 'ellos', PERSON_COLORS['ellos'])
 
-    # Special case: progressive (estar + gerund)
-    # estoy → color only "oy" in estoy
-    if word_lower == 'estoy':
-        return ('est', 'oy', 'yo', PERSON_COLORS['yo'])
-    elif word_lower == 'voy':
-        return ('v', 'oy', 'yo', PERSON_COLORS['yo'])
-    elif word_lower.startswith('est'):
-        rest = word_lower[3:]
-        if rest == 'ás':
-            return (word[:3], word[3:], 'tu', PERSON_COLORS['tu'])
-        elif rest == 'á':
-            return (word[:3], word[3:], 'el', PERSON_COLORS['el'])
-        elif rest == 'amos':
-            return (word[:3], word[3:], 'nosotros', PERSON_COLORS['nosotros'])
-        elif rest == 'án':
-            return (word[:3], word[3:], 'ellos', PERSON_COLORS['ellos'])
+    # Estar: est + oy/ás/á/amos/án
+    if word_lower in ['estoy', 'estás', 'está', 'estamos', 'están']:
+        if word_lower == 'estoy':
+            return ('est', 'oy', 'yo', PERSON_COLORS['yo'])
+        elif word_lower == 'estás':
+            return ('est', 'ás', 'tu', PERSON_COLORS['tu'])
+        elif word_lower == 'está':
+            return ('est', 'á', 'el', PERSON_COLORS['el'])
+        elif word_lower == 'estamos':
+            return ('est', 'amos', 'nosotros', PERSON_COLORS['nosotros'])
+        elif word_lower == 'están':
+            return ('est', 'án', 'ellos', PERSON_COLORS['ellos'])
 
-    # Special case: ir a + infinitive
-    # vas, va, vamos, van
-    if word_lower.startswith('v') and len(word_lower) <= 5:
-        rest = word_lower[1:]
-        if rest == 'as':
+    # Ir: v + oy/as/a/amos/an
+    if word_lower in ['voy', 'vas', 'va', 'vamos', 'van']:
+        if word_lower == 'voy':
+            return ('v', 'oy', 'yo', PERSON_COLORS['yo'])
+        elif word_lower == 'vas':
             return ('v', 'as', 'tu', PERSON_COLORS['tu'])
-        elif rest == 'a':
+        elif word_lower == 'va':
             return ('v', 'a', 'el', PERSON_COLORS['el'])
-        elif rest == 'amos':
+        elif word_lower == 'vamos':
             return ('v', 'amos', 'nosotros', PERSON_COLORS['nosotros'])
-        elif rest == 'an':
+        elif word_lower == 'van':
             return ('v', 'an', 'ellos', PERSON_COLORS['ellos'])
 
-    # Imperfect -aba (shared yo/él ending) - ORANGE
-    if word_lower.endswith('aba'):
-        return (word[:-3], word[-3:], 'shared', PERSON_COLORS['shared'])
-    elif word_lower.endswith('abas'):
-        return (word[:-4], word[-4:], 'tu', PERSON_COLORS['tu'])
-    elif word_lower.endswith('ábamos'):
+    # Imperfect -aba (shared yo/él)
+    if word_lower.endswith('ábamos'):
         return (word[:-6], word[-6:], 'nosotros', PERSON_COLORS['nosotros'])
     elif word_lower.endswith('aban'):
         return (word[:-4], word[-4:], 'ellos', PERSON_COLORS['ellos'])
+    elif word_lower.endswith('abas'):
+        return (word[:-4], word[-4:], 'tu', PERSON_COLORS['tu'])
+    elif word_lower.endswith('aba'):
+        return (word[:-3], word[-3:], 'shared', PERSON_COLORS['shared'])
 
-    # Imperfect -ía (shared yo/él ending) - ORANGE
-    if word_lower.endswith('ía') and not word_lower.endswith('haría'):  # avoid double match
-        return (word[:-2], word[-2:], 'shared', PERSON_COLORS['shared'])
-    elif word_lower.endswith('ías'):
-        return (word[:-3], word[-3:], 'tu', PERSON_COLORS['tu'])
-    elif word_lower.endswith('íamos'):
+    # Imperfect -ía (shared yo/él)
+    if word_lower.endswith('íamos'):
         return (word[:-5], word[-5:], 'nosotros', PERSON_COLORS['nosotros'])
     elif word_lower.endswith('ían'):
         return (word[:-3], word[-3:], 'ellos', PERSON_COLORS['ellos'])
-
-    # Conditional (haría, comería, viviría) - uses -ía endings
-    # Already handled above with -ía pattern
-
-    # Preterite patterns
-    # yo: -é
-    if word_lower.endswith('é'):
-        return (word[:-1], word[-1:], 'yo', PERSON_COLORS['yo'])
-    # tú: -ste
-    elif word_lower.endswith('ste'):
+    elif word_lower.endswith('ías'):
         return (word[:-3], word[-3:], 'tu', PERSON_COLORS['tu'])
-    # él: -ó
+    elif word_lower.endswith('ía'):
+        return (word[:-2], word[-2:], 'shared', PERSON_COLORS['shared'])
+
+    # Preterite
+    if word_lower.endswith('aron'):
+        return (word[:-4], word[-4:], 'ellos', PERSON_COLORS['ellos'])
+    elif word_lower.endswith('ieron'):
+        return (word[:-5], word[-5:], 'ellos', PERSON_COLORS['ellos'])
+    elif word_lower.endswith('aste'):
+        return (word[:-4], word[-4:], 'tu', PERSON_COLORS['tu'])
+    elif word_lower.endswith('iste'):
+        return (word[:-4], word[-4:], 'tu', PERSON_COLORS['tu'])
+    elif word_lower.endswith('é'):
+        return (word[:-1], word[-1:], 'yo', PERSON_COLORS['yo'])
     elif word_lower.endswith('ó'):
         return (word[:-1], word[-1:], 'el', PERSON_COLORS['el'])
-    # ellos: -ron
-    elif word_lower.endswith('ron'):
-        return (word[:-3], word[-3:], 'ellos', PERSON_COLORS['ellos'])
+    elif word_lower.endswith('ió'):
+        return (word[:-2], word[-2:], 'el', PERSON_COLORS['el'])
 
-    # Future (hablaré, comeré, viviré)
-    # yo: -é (already covered above in preterite)
-    # tú: -ás
-    elif word_lower.endswith('rás'):
-        return (word[:-2], word[-2:], 'tu', PERSON_COLORS['tu'])
-    # él: -á
-    elif word_lower.endswith('rá'):
-        return (word[:-1], word[-1:], 'el', PERSON_COLORS['el'])
-    # nosotros: -emos (with r before)
-    elif word_lower.endswith('remos'):
+    # Present: -mos (most distinctive)
+    if word_lower.endswith('amos'):
         return (word[:-4], word[-4:], 'nosotros', PERSON_COLORS['nosotros'])
-    # ellos: -án
-    elif word_lower.endswith('rán'):
-        return (word[:-2], word[-2:], 'ellos', PERSON_COLORS['ellos'])
+    elif word_lower.endswith('emos'):
+        return (word[:-4], word[-4:], 'nosotros', PERSON_COLORS['nosotros'])
+    elif word_lower.endswith('imos'):
+        return (word[:-4], word[-4:], 'nosotros', PERSON_COLORS['nosotros'])
 
-    # Present tense patterns (most common)
-    # Check -mos first (nosotros) - most distinctive
-    if word_lower.endswith('mos'):
-        return (word[:-3], word[-3:], 'nosotros', PERSON_COLORS['nosotros'])
-    # tú: -s (but not -mos which we already caught)
-    elif word_lower.endswith('s') and not word_lower.endswith('mos'):
+    # Present: -s (tú) - check longer endings first
+    if word_lower.endswith('as') and not word_lower.endswith('abas'):
+        return (word[:-2], word[-2:], 'tu', PERSON_COLORS['tu'])
+    elif word_lower.endswith('es') and not word_lower.endswith(('eres', 'iones')):
+        return (word[:-2], word[-2:], 'tu', PERSON_COLORS['tu'])
+    elif word_lower.endswith('s') and len(word_lower) >= 4:
         return (word[:-1], word[-1:], 'tu', PERSON_COLORS['tu'])
-    # ellos: -n (but not -ron, -rán, -aban, -ían which we caught)
-    elif word_lower.endswith('n') and not (word_lower.endswith('ron') or word_lower.endswith('rán') or word_lower.endswith('aban') or word_lower.endswith('ían')):
+
+    # Present: -n (ellos)
+    if word_lower.endswith('an') and not word_lower.endswith(('aban', 'rán')):
+        return (word[:-2], word[-2:], 'ellos', PERSON_COLORS['ellos'])
+    elif word_lower.endswith('en') and not word_lower.endswith('ieren'):
+        return (word[:-2], word[-2:], 'ellos', PERSON_COLORS['ellos'])
+    elif word_lower.endswith('n') and len(word_lower) >= 4:
         return (word[:-1], word[-1:], 'ellos', PERSON_COLORS['ellos'])
-    # yo: -o (but be careful - only if it looks like a verb)
-    elif word_lower.endswith('o') and len(word_lower) >= 3:
-        # Common verb endings that end in -o for yo
-        if any(word_lower.endswith(pattern) for pattern in ['ablo', 'como', 'vivo', 'hago', 'tengo', 'digo', 'pongo', 'salgo', 'traigo']):
-            return (word[:-1], word[-1:], 'yo', PERSON_COLORS['yo'])
-        # Or if preceded by typical verb stem patterns
-        elif len(word_lower) >= 4 and word_lower[-2] in 'aeiáéíó':
-            return (word[:-1], word[-1:], 'yo', PERSON_COLORS['yo'])
-    # él/ella/usted: thematic vowel (e.g., habla, come, vive)
-    # This is trickier - single vowel at end (a, e)
-    elif word_lower.endswith('a') and len(word_lower) >= 4:
-        # Check if it looks like a verb (ends in -la, -ma, -na, -ra, -sa, -ta, etc.)
-        if word_lower[-2] in 'blmnrst':
-            return (word[:-1], word[-1:], 'el', PERSON_COLORS['el'])
+
+    # Present: -o (yo)
+    if word_lower.endswith('o') and len(word_lower) >= 4:
+        return (word[:-1], word[-1:], 'yo', PERSON_COLORS['yo'])
+
+    # Present: -a, -e (él/ella) - thematic vowel
+    if word_lower.endswith('a') and len(word_lower) >= 4:
+        return (word[:-1], word[-1:], 'el', PERSON_COLORS['el'])
     elif word_lower.endswith('e') and len(word_lower) >= 4:
-        # Check if it looks like a verb
-        if word_lower[-2] in 'bcmnrst':
-            return (word[:-1], word[-1:], 'el', PERSON_COLORS['el'])
+        return (word[:-1], word[-1:], 'el', PERSON_COLORS['el'])
 
     return None
 
 def apply_spanish_verb_coloring(words):
     """
-    Apply automatic verb coloring to Spanish text based on Paco's grammar rules
-    Takes a list of word dictionaries and returns them with colors applied
+    Apply verb coloring using linguistic gates (Paco's Grammar)
+    Only colors actual verbs, not nouns. Only colors endings, not whole words.
     """
     colored_words = []
 
-    for word_obj in words:
+    for i, word_obj in enumerate(words):
         text = word_obj.get('text', '').strip()
 
-        # Try to identify verb ending
-        result = identify_verb_ending(text)
+        # Get context
+        prev_word = words[i-1]['text'].strip() if i > 0 else None
+        next_word = words[i+1]['text'].strip() if i < len(words) - 1 else None
+        is_first = (i == 0)
+
+        # Phase 1: Verb Gate (filter out non-verbs)
+        if not passes_verb_gate(text, prev_word, next_word, is_first):
+            # Not a verb - keep original
+            colored_words.append(word_obj.copy())
+            continue
+
+        # Phase 2: Identify ending (only for verbs)
+        result = identify_verb_ending_gated(text)
 
         if result:
             stem, ending, person, color = result
 
-            # Create character-level colors
-            # Everything before the ending stays default color, ending gets the person color
-            char_colors = []
-
-            # Stem characters - default color
-            for i in range(len(stem)):
-                char_colors.append({
-                    'start': word_obj['start'],
-                    'end': word_obj['end'],
-                    'text': stem[i],
-                    'color': DEFAULT_SAMPLE_TEXT_COLOR
-                })
-
-            # Ending characters - person color
-            for i in range(len(ending)):
-                char_colors.append({
-                    'start': word_obj['start'],
-                    'end': word_obj['end'],
-                    'text': ending[i],
-                    'color': color
-                })
-
-            # For now, just color the whole word with the ending color
-            # (We'd need character-level support in the editor for partial coloring)
+            # Create word with character-level coloring info
             colored_word = word_obj.copy()
-            colored_word['color'] = color
+            colored_word['is_verb'] = True
             colored_word['stem'] = stem
             colored_word['ending'] = ending
+            colored_word['ending_color'] = color
             colored_word['person'] = person
+            # For now, color the whole word (character-level coloring comes later)
+            colored_word['color'] = color
             colored_words.append(colored_word)
         else:
-            # Not a recognized verb - keep original
+            # Passed gate but no ending match - keep original
             colored_words.append(word_obj.copy())
 
     return colored_words
