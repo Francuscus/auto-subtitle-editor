@@ -333,7 +333,10 @@ def _parse_char_level_colors(text_with_html: str) -> List[Tuple[str, str]]:
     parser.feed(text_with_html)
     return parser.chars
 
-def export_to_ass(words: List[dict], words_per_line: int = 5, font="Arial", size=36) -> str:
+def export_to_ass(words: List[dict], words_per_line: int = 5, font="Arial", size=36, alignment="2") -> str:
+    # alignment: 1=left-bottom, 2=center-bottom, 3=right-bottom
+    #            4=left-middle, 5=center-middle, 6=right-middle
+    #            7=left-top, 8=center-top, 9=right-top
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1280
@@ -342,7 +345,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,30,30,30,1
+Style: Default,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,{alignment},30,30,30,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -757,9 +760,18 @@ function onTextSelect() {
 // Handle editor changes
 function onEditorChange() {
     const editor = document.getElementById('lyric-editor');
+    const hiddenInput = document.getElementById('editor-content-hidden');
+
     if (editor) {
         editorContent = editor.innerHTML;
         console.log('Editor content changed');
+
+        // Sync to hidden Gradio textbox
+        if (hiddenInput && hiddenInput.querySelector('textarea')) {
+            const textarea = hiddenInput.querySelector('textarea');
+            textarea.value = editorContent;
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        }
     }
 }
 
@@ -1261,6 +1273,12 @@ def create_app():
                 )
                 font_size = gr.Slider(minimum=20, maximum=96, value=48, step=2, label="Font Size")
 
+                text_position = gr.Dropdown(
+                    choices=[("Bottom", "2"), ("Center", "5"), ("Top", "8")],
+                    value="2",
+                    label="Text Position"
+                )
+
                 bg_color = gr.ColorPicker(value="#000000", label="Background Color")
                 size_dd = gr.Dropdown(
                     choices=["1280x720", "1920x1080", "1080x1920", "1080x1080"],
@@ -1305,6 +1323,9 @@ def create_app():
                         <button class="toolbar-btn" onclick="applyColor('#0000FF')" title="Blue">
                             <span style="color: #0000FF;">●</span> Blue
                         </button>
+                        <button class="toolbar-btn" onclick="applyColor('#9C27B0')" title="Purple">
+                            <span style="color: #9C27B0;">●</span> Purple
+                        </button>
                         <button class="toolbar-btn" onclick="applyColor('#FF00FF')" title="Magenta">
                             <span style="color: #FF00FF;">●</span> Magenta
                         </button>
@@ -1344,6 +1365,9 @@ def create_app():
                     '<div id="lyric-editor">Select and transcribe audio to begin editing...</div>',
                     elem_id="lyric-editor"
                 )
+
+                # Hidden textbox to capture editor content
+                editor_content_state = gr.Textbox(visible=False, elem_id="editor-content-hidden")
 
             # Right Column: Word list/timing info
             with gr.Column(scale=2):
@@ -1530,7 +1554,59 @@ def create_app():
             outputs=[edited_words_state, editor_html]
         )
 
-        def handle_export_mp4(audio_path, edited_words, n_words, font, size, bg_hex, canvas_size):
+        def parse_editor_html_colors(editor_html_content, original_words):
+            """Parse the editor HTML to extract colors and update word data"""
+            if not editor_html_content or not original_words:
+                return original_words
+
+            try:
+                from html.parser import HTMLParser
+                import re
+
+                class EditorParser(HTMLParser):
+                    def __init__(self):
+                        super().__init__()
+                        self.words = []
+                        self.current_styles = []
+
+                    def handle_starttag(self, tag, attrs):
+                        attrs_dict = dict(attrs)
+                        if tag == "span" and "data-start" in attrs_dict:
+                            # This is a word span
+                            style = attrs_dict.get("style", "")
+                            color_match = re.search(r'color:\s*([^;]+)', style)
+                            color = color_match.group(1).strip() if color_match else DEFAULT_SAMPLE_TEXT_COLOR
+                            self.current_styles.append({
+                                "start": float(attrs_dict.get("data-start", 0)),
+                                "end": float(attrs_dict.get("data-end", 0)),
+                                "color": color,
+                                "html": ""
+                            })
+
+                    def handle_data(self, data):
+                        if self.current_styles:
+                            self.current_styles[-1]["html"] += data
+
+                    def handle_endtag(self, tag):
+                        if tag == "span" and self.current_styles:
+                            word_data = self.current_styles.pop()
+                            word_data["text"] = word_data["html"]
+                            self.words.append(word_data)
+
+                parser = EditorParser()
+                parser.feed(editor_html_content)
+
+                # If we successfully parsed words, return them
+                if parser.words:
+                    return parser.words
+                else:
+                    return original_words
+
+            except Exception as e:
+                print(f"Error parsing editor HTML: {e}")
+                return original_words
+
+        def handle_export_mp4(audio_path, edited_words, editor_html_content, n_words, font, size, alignment, bg_hex, canvas_size):
             """Export the final MP4 video with lyrics"""
             if not audio_path:
                 gr.Warning("Upload audio first.")
@@ -1541,8 +1617,11 @@ def create_app():
                 return None, "❌ No lyrics to export."
 
             try:
-                # Generate ASS subtitle file
-                ass_content = export_to_ass(edited_words, int(n_words), font, int(size))
+                # Capture colors from editor HTML
+                updated_words = parse_editor_html_colors(editor_html_content, edited_words)
+
+                # Generate ASS subtitle file with alignment
+                ass_content = export_to_ass(updated_words, int(n_words), font, int(size), alignment)
                 ass_path = _save_temp(ass_content, ".ass")
 
                 # Create MP4 with burned subtitles
@@ -1564,7 +1643,7 @@ def create_app():
 
         export_mp4_btn.click(
             fn=handle_export_mp4,
-            inputs=[audio_state, edited_words_state, words_per, font_family, font_size, bg_color, size_dd],
+            inputs=[audio_state, edited_words_state, editor_content_state, words_per, font_family, font_size, text_position, bg_color, size_dd],
             outputs=[exported_video, status_box]
         )
 
