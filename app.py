@@ -1380,6 +1380,8 @@ def create_app():
                 )
 
                 gr.Markdown("### 🎨 Quick Actions")
+                save_colors_btn = gr.Button("💾 Save Colors", variant="primary")
+                save_status = gr.Textbox(label="Save Status", value="", interactive=False, lines=1, visible=False)
                 update_preview_btn = gr.Button("🔄 Update Preview")
                 clear_formatting_btn = gr.Button("🧹 Clear All Formatting")
 
@@ -1524,6 +1526,23 @@ def create_app():
             fn=update_preview_display,
             inputs=[edited_words_state],
             outputs=[preview_html]
+        )
+
+        def save_colors_from_editor(editor_html_content, original_words):
+            """Save colors from the editor to the word state"""
+            if not editor_html_content or not original_words:
+                return original_words, gr.update(value="❌ No changes to save", visible=True)
+
+            try:
+                updated_words = parse_editor_html_colors(editor_html_content, original_words)
+                return updated_words, gr.update(value="✅ Colors saved! Ready to export.", visible=True)
+            except Exception as e:
+                return original_words, gr.update(value=f"❌ Error: {e}", visible=True)
+
+        save_colors_btn.click(
+            fn=save_colors_from_editor,
+            inputs=[editor_content_state, edited_words_state],
+            outputs=[edited_words_state, save_status]
         )
 
         def clear_all_formatting(words):
