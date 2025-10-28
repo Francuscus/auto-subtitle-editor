@@ -630,6 +630,99 @@ CUSTOM_CSS = """
 .char-styled {
     display: inline;
 }
+
+#ipa-picker-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    justify-content: center;
+    align-items: center;
+    z-index: 9999;
+}
+
+#ipa-picker-overlay.active {
+    display: flex;
+}
+
+#ipa-picker {
+    background: white;
+    border-radius: 12px;
+    padding: 24px;
+    max-width: 800px;
+    max-height: 80vh;
+    overflow-y: auto;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+}
+
+#ipa-picker h3 {
+    margin-top: 0;
+    color: #00BCD4;
+    border-bottom: 2px solid #00BCD4;
+    padding-bottom: 8px;
+}
+
+.ipa-category {
+    margin: 16px 0;
+}
+
+.ipa-category h4 {
+    color: #555;
+    margin: 8px 0;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.ipa-symbols {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.ipa-symbol-btn {
+    min-width: 40px;
+    height: 40px;
+    padding: 8px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    background: white;
+    cursor: pointer;
+    font-size: 20px;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.ipa-symbol-btn:hover {
+    background: #00BCD4;
+    color: white;
+    border-color: #00BCD4;
+    transform: scale(1.1);
+}
+
+.ipa-picker-close {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: #f44336;
+    color: white;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 20px;
+    font-weight: bold;
+}
+
+.ipa-picker-close:hover {
+    background: #d32f2f;
+}
 """
 
 EDITOR_JS = """
@@ -888,6 +981,56 @@ document.addEventListener('DOMContentLoaded', () => {
     initTimeline();
 });
 
+// IPA Picker Functions
+function showIPAPicker() {
+    const overlay = document.getElementById('ipa-picker-overlay');
+    if (overlay) {
+        overlay.classList.add('active');
+    }
+}
+
+function hideIPAPicker() {
+    const overlay = document.getElementById('ipa-picker-overlay');
+    if (overlay) {
+        overlay.classList.remove('active');
+    }
+}
+
+function insertIPASymbol(symbol) {
+    const selection = window.getSelection();
+    if (!selection.rangeCount) {
+        // No selection, just insert at cursor
+        const editor = document.getElementById('lyric-editor');
+        if (editor) {
+            editor.focus();
+            document.execCommand('insertText', false, symbol);
+        }
+    } else {
+        // Insert after selection
+        const range = selection.getRangeAt(0);
+        range.collapse(false); // Move to end of selection
+        const textNode = document.createTextNode(symbol);
+        range.insertNode(textNode);
+
+        // Move cursor after inserted symbol
+        range.setStartAfter(textNode);
+        range.setEndAfter(textNode);
+        selection.removeAllRanges();
+        selection.addRange(range);
+    }
+
+    onEditorChange();
+    hideIPAPicker();
+}
+
+// Close IPA picker when clicking outside
+document.addEventListener('click', (e) => {
+    const overlay = document.getElementById('ipa-picker-overlay');
+    if (overlay && e.target === overlay) {
+        hideIPAPicker();
+    }
+});
+
 // Make functions globally accessible
 window.applyColor = applyColor;
 window.applyAccent = applyAccent;
@@ -896,6 +1039,9 @@ window.togglePlayback = togglePlayback;
 window.getEditorHTML = getEditorHTML;
 window.extractStyledWords = extractStyledWords;
 window.setWordTimings = setWordTimings;
+window.showIPAPicker = showIPAPicker;
+window.hideIPAPicker = hideIPAPicker;
+window.insertIPASymbol = insertIPASymbol;
 </script>
 """
 
@@ -906,6 +1052,153 @@ def create_app():
         css=CUSTOM_CSS
     ) as demo:
 
+        # IPA Picker Popup HTML
+        IPA_PICKER_HTML = """
+        <div id="ipa-picker-overlay">
+            <div id="ipa-picker" style="position: relative;">
+                <button class="ipa-picker-close" onclick="hideIPAPicker()">×</button>
+                <h3>📚 IPA Character Picker</h3>
+
+                <div class="ipa-category">
+                    <h4>Vowels</h4>
+                    <div class="ipa-symbols">
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('i')" title="close front unrounded">i</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('y')" title="close front rounded">y</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɨ')" title="close central unrounded">ɨ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʉ')" title="close central rounded">ʉ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɯ')" title="close back unrounded">ɯ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('u')" title="close back rounded">u</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('e')" title="close-mid front unrounded">e</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ø')" title="close-mid front rounded">ø</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɘ')" title="close-mid central unrounded">ɘ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɵ')" title="close-mid central rounded">ɵ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɤ')" title="close-mid back unrounded">ɤ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('o')" title="close-mid back rounded">o</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ə')" title="schwa">ə</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɛ')" title="open-mid front unrounded">ɛ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('œ')" title="open-mid front rounded">œ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɜ')" title="open-mid central unrounded">ɜ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɞ')" title="open-mid central rounded">ɞ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʌ')" title="open-mid back unrounded">ʌ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɔ')" title="open-mid back rounded">ɔ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('æ')" title="near-open front unrounded">æ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('a')" title="open front unrounded">a</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɶ')" title="open front rounded">ɶ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɑ')" title="open back unrounded">ɑ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɒ')" title="open back rounded">ɒ</button>
+                    </div>
+                </div>
+
+                <div class="ipa-category">
+                    <h4>Consonants (Plosives & Nasals)</h4>
+                    <div class="ipa-symbols">
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('p')">p</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('b')">b</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('t')">t</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('d')">d</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʈ')" title="retroflex">ʈ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɖ')" title="retroflex">ɖ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('c')" title="voiceless palatal">c</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɟ')" title="voiced palatal">ɟ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('k')">k</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('g')">g</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('q')" title="uvular">q</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɢ')" title="uvular">ɢ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʔ')" title="glottal stop">ʔ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('m')">m</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɱ')" title="labiodental">ɱ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('n')">n</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɳ')" title="retroflex">ɳ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɲ')" title="palatal">ɲ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ŋ')" title="velar">ŋ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɴ')" title="uvular">ɴ</button>
+                    </div>
+                </div>
+
+                <div class="ipa-category">
+                    <h4>Fricatives</h4>
+                    <div class="ipa-symbols">
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɸ')" title="voiceless bilabial">ɸ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('β')" title="voiced bilabial">β</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('f')">f</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('v')">v</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('θ')" title="theta">θ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ð')" title="eth">ð</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('s')">s</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('z')">z</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʃ')" title="sh">ʃ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʒ')" title="zh">ʒ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʂ')" title="retroflex">ʂ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʐ')" title="retroflex">ʐ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ç')" title="voiceless palatal">ç</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʝ')" title="voiced palatal">ʝ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('x')" title="voiceless velar">x</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɣ')" title="voiced velar">ɣ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('χ')" title="voiceless uvular">χ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʁ')" title="voiced uvular">ʁ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ħ')" title="voiceless pharyngeal">ħ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʕ')" title="voiced pharyngeal">ʕ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('h')">h</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɦ')" title="voiced glottal">ɦ</button>
+                    </div>
+                </div>
+
+                <div class="ipa-category">
+                    <h4>Approximants & Liquids</h4>
+                    <div class="ipa-symbols">
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʋ')" title="labiodental approximant">ʋ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɹ')" title="alveolar approximant">ɹ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɻ')" title="retroflex approximant">ɻ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('j')" title="palatal approximant">j</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɰ')" title="velar approximant">ɰ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('l')">l</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ɭ')" title="retroflex lateral">ɭ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʎ')" title="palatal lateral">ʎ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʟ')" title="velar lateral">ʟ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('r')" title="trill">r</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʀ')" title="uvular trill">ʀ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('w')">w</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʍ')" title="voiceless w">ʍ</button>
+                    </div>
+                </div>
+
+                <div class="ipa-category">
+                    <h4>Diacritics & Suprasegmentals</h4>
+                    <div class="ipa-symbols">
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ˈ')" title="primary stress">ˈ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ˌ')" title="secondary stress">ˌ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ː')" title="long">ː</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ˑ')" title="half-long">ˑ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('̆')" title="extra-short">̆</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʰ')" title="aspirated">ʰ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʷ')" title="labialized">ʷ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ʲ')" title="palatalized">ʲ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ˠ')" title="velarized">ˠ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('ˤ')" title="pharyngealized">ˤ</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('̃')" title="nasalized">̃</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('̥')" title="voiceless">̥</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('̬')" title="voiced">̬</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('̩')" title="syllabic">̩</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('̯')" title="non-syllabic">̯</button>
+                    </div>
+                </div>
+
+                <div class="ipa-category">
+                    <h4>Tone Marks</h4>
+                    <div class="ipa-symbols">
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('́')" title="high tone">́</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('̀')" title="low tone">̀</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('̄')" title="mid tone">̄</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('̂')" title="rising tone">̂</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('̌')" title="falling tone">̌</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('↗')" title="global rise">↗</button>
+                        <button class="ipa-symbol-btn" onclick="insertIPASymbol('↘')" title="global fall">↘</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        """
+
         gr.HTML(
             f"""
             <div style="background:{BANNER_COLOR};color:white;padding:18px;border-radius:12px;margin-bottom:16px;text-align:center">
@@ -913,6 +1206,7 @@ def create_app():
               <div style="opacity:0.9;">Version {VERSION} — Create Beautiful Lyric Videos</div>
             </div>
             {EDITOR_JS}
+            {IPA_PICKER_HTML}
             """
         )
 
@@ -1035,6 +1329,10 @@ def create_app():
                         </button>
                         <button class="toolbar-btn" onclick="applyAccent(4, '{a4_sym}')" title="{a4_label}">
                             {a4_label}
+                        </button>
+                        <div style="width: 1px; height: 30px; background: #ddd; margin: 0 8px;"></div>
+                        <button class="toolbar-btn" onclick="showIPAPicker()" title="Open full IPA character picker" style="background: #4CAF50; color: white; font-weight: bold;">
+                            📚 Full IPA Picker
                         </button>
                     </div>
                     """
