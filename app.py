@@ -1361,8 +1361,20 @@ def create_app():
 
                 gr.Markdown("---")
                 gr.Markdown("### 🔗 Acentos Program Integration")
-                gr.Markdown("*Import/Export to sync with your IPA acentos program*")
+                gr.Markdown("*Auto-transcribe to IPA using your acentos program*")
 
+                acentos_status = gr.Textbox(label="Acentos API Status", value="Not connected", interactive=False, lines=1)
+
+                gr.Markdown("**Quick IPA Transcription:**")
+                with gr.Row():
+                    transcribe_dominican_btn = gr.Button("🇩🇴 Dominican", size="sm")
+                    transcribe_mexican_btn = gr.Button("🇲🇽 Mexican", size="sm")
+
+                with gr.Row():
+                    transcribe_rioplatense_btn = gr.Button("🇦🇷 Rioplatense", size="sm")
+                    transcribe_cadiz_btn = gr.Button("🇪🇸 Cádiz", size="sm")
+
+                gr.Markdown("**Import/Export:**")
                 with gr.Row():
                     export_config_btn = gr.Button("📤 Export Config", size="sm")
                     import_config_btn = gr.Button("📥 Import Config", size="sm")
@@ -1670,6 +1682,69 @@ def create_app():
             fn=import_lyrics_with_timing,
             inputs=[lyrics_file],
             outputs=[edited_words_state]
+        )
+
+        # Acentos API Transcription Handlers
+        ACENTOS_API_URL = "http://localhost:5000"
+
+        def call_acentos_api(text, dialect):
+            """Call the acentos API to transcribe Spanish text to IPA"""
+            import requests
+            try:
+                response = requests.post(
+                    f"{ACENTOS_API_URL}/transcribe",
+                    json={"text": text, "dialect": dialect},
+                    timeout=5
+                )
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    return {"error": f"API returned status {response.status_code}"}
+            except requests.exceptions.ConnectionError:
+                return {"error": "Cannot connect to acentos server. Is it running on port 5000?"}
+            except Exception as e:
+                return {"error": str(e)}
+
+        def transcribe_to_ipa(edited_words, dialect_name, dialect_id):
+            """Transcribe lyrics to IPA using acentos API"""
+            if not edited_words:
+                return edited_words, f"❌ No lyrics to transcribe. Transcribe audio first."
+
+            # Extract all text
+            text = " ".join([w["text"] for w in edited_words])
+
+            # Call acentos API
+            result = call_acentos_api(text, dialect_id)
+
+            if "error" in result:
+                return edited_words, f"❌ Error: {result['error']}"
+
+            # For now, just show success - full integration coming
+            ipa_text = result.get("ipa", "")
+            return edited_words, f"✅ Transcribed to {dialect_name} IPA: {ipa_text}"
+
+        transcribe_dominican_btn.click(
+            fn=lambda words: transcribe_to_ipa(words, "Dominican", "dominican"),
+            inputs=[edited_words_state],
+            outputs=[edited_words_state, acentos_status]
+        )
+
+        transcribe_mexican_btn.click(
+            fn=lambda words: transcribe_to_ipa(words, "Mexican", "mexican"),
+            inputs=[edited_words_state],
+            outputs=[edited_words_state, acentos_status]
+        )
+
+        transcribe_rioplatense_btn.click(
+            fn=lambda words: transcribe_to_ipa(words, "Rioplatense", "rioplatense"),
+            inputs=[edited_words_state],
+            outputs=[edited_words_state, acentos_status]
+        )
+
+        transcribe_cadiz_btn.click(
+            fn=lambda words: transcribe_to_ipa(words, "Cádiz", "cadiz"),
+            inputs=[edited_words_state],
+            outputs=[edited_words_state, acentos_status]
         )
 
         return demo

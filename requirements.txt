@@ -7,3 +7,8 @@ torchaudio==2.8.0
 av==12.3.0
 ffmpeg-python>=0.2.0
 numpy>=1.26,<3
+
+# Acentos API Server
+flask>=3.0.0
+flask-cors>=4.0.0
+requests>=2.31.0
