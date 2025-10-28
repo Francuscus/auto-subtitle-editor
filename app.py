@@ -1,6 +1,6 @@
 # Language Learning Subtitle Editor
-# Version 2.3 — HTML/ZIP import + ASS/SRT + Burn MP4 from Audio
-# Banner Color: #00BCD4 (Cyan)
+# Version 3.0 — Integrated IPA Transcription + Color Persistence + Save Button
+# Banner Color: #FF6B6B (Coral Red)
 
 import os
 import re
@@ -17,8 +17,8 @@ import whisperx
 
 # -------------------------- Config --------------------------
 
-VERSION = "2.3"
-BANNER_COLOR = "#00BCD4"  # Cyan banner
+VERSION = "3.0"
+BANNER_COLOR = "#FF6B6B"  # Coral Red banner
 DEFAULT_SAMPLE_TEXT_COLOR = "#1e88e5"  # Blue so it isn't white-on-white
 
 LANG_MAP = {
