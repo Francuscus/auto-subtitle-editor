@@ -333,7 +333,10 @@ def _parse_char_level_colors(text_with_html: str) -> List[Tuple[str, str]]:
     parser.feed(text_with_html)
     return parser.chars
 
-def export_to_ass(words: List[dict], words_per_line: int = 5, font="Arial", size=36) -> str:
+def export_to_ass(words: List[dict], words_per_line: int = 5, font="Arial", size=36, alignment="2") -> str:
+    # alignment: 1=left-bottom, 2=center-bottom, 3=right-bottom
+    #            4=left-middle, 5=center-middle, 6=right-middle
+    #            7=left-top, 8=center-top, 9=right-top
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1280
@@ -342,7 +345,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,30,30,30,1
+Style: Default,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,{alignment},30,30,30,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -1261,6 +1264,12 @@ def create_app():
                 )
                 font_size = gr.Slider(minimum=20, maximum=96, value=48, step=2, label="Font Size")
 
+                text_position = gr.Dropdown(
+                    choices=[("Bottom", "2"), ("Center", "5"), ("Top", "8")],
+                    value="2",
+                    label="Text Position"
+                )
+
                 bg_color = gr.ColorPicker(value="#000000", label="Background Color")
                 size_dd = gr.Dropdown(
                     choices=["1280x720", "1920x1080", "1080x1920", "1080x1080"],
@@ -1304,6 +1313,9 @@ def create_app():
                         </button>
                         <button class="toolbar-btn" onclick="applyColor('#0000FF')" title="Blue">
                             <span style="color: #0000FF;">●</span> Blue
+                        </button>
+                        <button class="toolbar-btn" onclick="applyColor('#9C27B0')" title="Purple">
+                            <span style="color: #9C27B0;">●</span> Purple
                         </button>
                         <button class="toolbar-btn" onclick="applyColor('#FF00FF')" title="Magenta">
                             <span style="color: #FF00FF;">●</span> Magenta
@@ -1530,7 +1542,7 @@ def create_app():
             outputs=[edited_words_state, editor_html]
         )
 
-        def handle_export_mp4(audio_path, edited_words, n_words, font, size, bg_hex, canvas_size):
+        def handle_export_mp4(audio_path, edited_words, n_words, font, size, alignment, bg_hex, canvas_size):
             """Export the final MP4 video with lyrics"""
             if not audio_path:
                 gr.Warning("Upload audio first.")
@@ -1541,8 +1553,8 @@ def create_app():
                 return None, "❌ No lyrics to export."
 
             try:
-                # Generate ASS subtitle file
-                ass_content = export_to_ass(edited_words, int(n_words), font, int(size))
+                # Generate ASS subtitle file with alignment
+                ass_content = export_to_ass(edited_words, int(n_words), font, int(size), alignment)
                 ass_path = _save_temp(ass_content, ".ass")
 
                 # Create MP4 with burned subtitles
@@ -1564,7 +1576,7 @@ def create_app():
 
         export_mp4_btn.click(
             fn=handle_export_mp4,
-            inputs=[audio_state, edited_words_state, words_per, font_family, font_size, bg_color, size_dd],
+            inputs=[audio_state, edited_words_state, words_per, font_family, font_size, text_position, bg_color, size_dd],
             outputs=[exported_video, status_box]
         )
 
