@@ -53,6 +53,294 @@ def seconds_to_timestamp_ass(t: float) -> str:
     s = int(t);         cs = int(round((t - s) * 100))
     return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
 
+# -------------------------- IPA Transcription (Acentos) --------------------------
+# Integrated from https://github.com/Francuscus/acentos
+
+import unicodedata
+
+# IPA Constants
+IPA_VOWELS = 'aeiou'
+IPA_WEAK_VOWELS = 'iu'
+IPA_VALID_CLUSTERS = ['bl', 'br', 'kl', 'kr', 'dl', 'dr', 'fl', 'fr', 'gl', 'gr', 'pl', 'pr', 'tl', 'tr']
+
+def orthography_to_phonemes(text, dialect):
+    """Convert Spanish orthography to phonemes"""
+    result = (text or '').lower()
+    result = result.replace('ch', 'tʃ')
+    result = result.replace('h', '')
+    result = result.replace('ll', 'ʝ')
+    result = result.replace('rr', 'r')
+    result = result.replace('qu', 'k')
+
+    if dialect == 'cadiz':
+        result = re.sub(r'c([ei])', r'θ\1', result)
+        result = result.replace('z', 'θ')
+    else:
+        result = re.sub(r'c([ei])', r's\1', result)
+        result = result.replace('z', 's')
+
+    result = result.replace('c', 'k')
+    result = re.sub(r'g([ei])', r'x\1', result)
+    result = re.sub(r'gu([ei])', r'g\1', result)
+    result = result.replace('v', 'b')
+    result = re.sub(r'y(?=[aeiou])', 'ʝ', result)
+    result = re.sub(r'y$', 'i', result)
+    result = re.sub(r'([aeiou])y', r'\1i', result)
+    result = re.sub(r'^y', 'ʝ', result)
+    result = result.replace('j', 'x')
+    result = result.replace('ñ', 'ɲ')
+    result = re.sub(r'r$', 'R', result)
+    result = result.replace('r', 'ɾ')
+
+    return result
+
+def syllabify(phonemes, original_word):
+    """Break phonemes into syllables following Spanish phonotactics"""
+    vowels_set = set(IPA_VOWELS)
+    weak_set = set(IPA_WEAK_VOWELS)
+
+    stressed_weak_vowels = set()
+    if original_word:
+        vowel_index = 0
+        for i, ch in enumerate(original_word):
+            base = unicodedata.normalize('NFD', ch).encode('ascii', 'ignore').decode().lower()
+            if ch in ['í', 'Í', 'ú', 'Ú']:
+                stressed_weak_vowels.add(vowel_index)
+            if base in vowels_set:
+                vowel_index += 1
+
+    processed = ''
+    v_idx = 0
+    i = 0
+    while i < len(phonemes):
+        a = phonemes[i]
+        b = phonemes[i + 1] if i + 1 < len(phonemes) else None
+
+        a_is_v = a in vowels_set
+        b_is_v = b in vowels_set if b else False
+
+        if a_is_v and b_is_v:
+            a_weak = a in weak_set
+            b_weak = b in weak_set
+            a_stressed_weak = a_weak and v_idx in stressed_weak_vowels
+            b_stressed_weak = b_weak and (v_idx + 1) in stressed_weak_vowels
+
+            is_dip = (not a_stressed_weak and not b_stressed_weak) and (
+                (a_weak and not b_weak) or (not a_weak and b_weak) or (a_weak and b_weak)
+            )
+
+            if is_dip:
+                if a_weak:
+                    processed += ('j' if a == 'i' else 'w') + b
+                elif b_weak:
+                    processed += a + ('j' if b == 'i' else 'w')
+                i += 2
+                v_idx += 2
+                continue
+            else:
+                processed += a
+                v_idx += 1
+                i += 1
+                continue
+
+        processed += a
+        if a_is_v:
+            v_idx += 1
+        i += 1
+
+    syllables = []
+    cur = ''
+    i = 0
+
+    while i < len(processed):
+        ch = processed[i]
+        cur += ch
+
+        if ch in IPA_VOWELS:
+            j = i + 1
+            cons = ''
+            while j < len(processed) and processed[j] not in IPA_VOWELS:
+                cons += processed[j]
+                j += 1
+
+            if len(cons) == 0:
+                syllables.append(cur)
+                cur = ''
+                i += 1
+                continue
+
+            if len(cons) == 1:
+                syllables.append(cur)
+                cur = cons
+                i += 2
+                continue
+
+            last_two = cons[-2:] if len(cons) >= 2 else ''
+            if last_two in IPA_VALID_CLUSTERS:
+                coda = cons[:-2]
+                cur += coda
+                syllables.append(cur)
+                cur = last_two
+                i = j
+            else:
+                coda = cons[:-1]
+                cur += coda
+                syllables.append(cur)
+                cur = cons[-1]
+                i = j
+            continue
+
+        i += 1
+
+    if cur:
+        syllables.append(cur)
+
+    return syllables
+
+def apply_stress(syllables, original_word):
+    """Mark primary stress with ˈ prefix"""
+    if not syllables:
+        return syllables
+
+    acute_match = re.search(r'[áéíóúÁÉÍÓÚ]', original_word or '')
+    if acute_match:
+        accent_map = {'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u',
+                     'Á': 'a', 'É': 'e', 'Í': 'i', 'Ó': 'o', 'Ú': 'u'}
+        v = accent_map[acute_match.group(0)]
+
+        for i in range(len(syllables) - 1, -1, -1):
+            if v in syllables[i]:
+                syllables[i] = 'ˈ' + syllables[i]
+                return syllables
+
+    last_char = original_word[-1] if original_word else ''
+    ends_in_vowel_ns = bool(re.search(r'[aeiouns]$', last_char, re.IGNORECASE))
+
+    if len(syllables) == 1:
+        idx = 0
+    else:
+        idx = len(syllables) - 2 if ends_in_vowel_ns else len(syllables) - 1
+
+    if idx >= 0:
+        syllables[idx] = 'ˈ' + syllables[idx]
+
+    return syllables
+
+def apply_dialect_rules(syllables, dialect, features):
+    """Apply dialect-specific phonological rules"""
+    result_syllables = []
+
+    for index, syllable in enumerate(syllables):
+        result = syllable
+        had_stress = 'ˈ' in result
+        if had_stress:
+            result = result.replace('ˈ', '')
+
+        is_last = index == len(syllables) - 1
+
+        if dialect == 'cadiz' and features.get('liquidSubCadiz', True):
+            result = re.sub(r'[ɾrR]$', 'l̪', result)
+            result = re.sub(r'[ɾrR](?=[bβdðgɣptkfθsxmnɲʝtʃjʃʒRθjwŋ])', 'l̪', result)
+
+        if dialect == 'cadiz' and features.get('finalRDeletionCadiz', True):
+            if is_last:
+                result = re.sub(r'[ɾrR]$', '', result)
+
+        if dialect == 'cadiz' and features.get('finalSDeletion', True):
+            if is_last:
+                result = re.sub(r'[sθ]$', 'h', result)
+            result = re.sub(r'[sθ](?=[bβdðgɣptkfxmnɲʝtʃjʃʒRθ])', 'h', result)
+
+        if dialect == 'rioplatense':
+            if is_last and 'R' in result:
+                result = result.replace('R', 'r')
+            else:
+                result = result.replace('R', 'ɾ')
+        else:
+            result = result.replace('R', 'ɾ')
+
+        if dialect == 'rioplatense' and features.get('sheismo', True):
+            result = result.replace('ʝ', 'ʃ')
+
+        if dialect == 'rioplatense' and features.get('sAspiration', True):
+            if is_last:
+                result = re.sub(r's$', 'h', result)
+            result = re.sub(r's(?=[bβdðgɣptkfθxmnɲʝtʃjʃʒRθ])', 'h', result)
+
+        if dialect == 'rioplatense' and features.get('finalRDeletion', True):
+            if is_last:
+                result = re.sub(r'ɾ$', '', result)
+
+        if dialect == 'dominican' and features.get('nVelarization', True):
+            if is_last:
+                result = re.sub(r'n$', 'ŋ', result)
+
+        if dialect == 'dominican' and features.get('liquidSub', True):
+            result = re.sub(r'[ɾrR]$', 'l̪', result)
+            result = re.sub(r'[ɾrR](?=[bβdðgɣptkfθsxmnɲʝtʃjʃʒRθjwŋl̪])', 'l̪', result)
+
+        if dialect == 'dominican' and features.get('sDelete', True):
+            result = re.sub(r's$', '', result)
+            result = re.sub(r's(?=[ptkg])', '', result)
+
+        if dialect == 'mexican' and features.get('assibilatedR', True):
+            if not re.match(r'^[ɾrR]', result):
+                result = result.replace('ɾ', 'ʂ').replace('r', 'ʂ').replace('R', 'ʂ')
+
+        result = re.sub(r'b(?![mnɲ])', 'β', result)
+        result = re.sub(r'([mnɲ])β', r'\1b', result)
+        result = result.replace('d', 'ð')
+        result = re.sub(r'([mnɲl̪])ð', r'\1d', result)
+        result = re.sub(r'g(?![mnɲ])', 'ɣ', result)
+        result = re.sub(r'([mnɲ])ɣ', r'\1g', result)
+        result = re.sub(r'l(?!̪)', 'l̪', result)
+
+        if had_stress:
+            result = 'ˈ' + result
+
+        result_syllables.append(result)
+
+    return result_syllables
+
+def transcribe_to_ipa_internal(text, dialect='dominican'):
+    """
+    Main IPA transcription function
+    Converts Spanish text to IPA notation using dialect-specific rules
+    """
+    features = {
+        'liquidSubCadiz': True, 'nVelarization': True, 'ceceo': True,
+        'finalRDeletionCadiz': True, 'finalSDeletion': True, 'liquidSub': True,
+        'sDelete': True, 'assibilatedR': True, 'sheismo': True,
+        'sAspiration': True, 'finalRDeletion': True, 'showSyllables': True
+    }
+
+    cleaned = re.sub(r'[.,;:!?¡¿()«»"""\'\'\\[\\]{}]', ' ', text.lower())
+    words = [w.strip() for w in cleaned.split() if w.strip()]
+
+    results = []
+
+    for word in words:
+        phonemes = orthography_to_phonemes(word, dialect)
+        syllables = syllabify(phonemes, word)
+        syllables = apply_stress(syllables, word)
+
+        if dialect == 'dominican' and syllables:
+            first_syl = syllables[0]
+            if re.match(r'^ˈ?[ɾrR]', first_syl):
+                if first_syl.startswith('ˈɾ') or first_syl.startswith('ˈr') or first_syl.startswith('ˈR'):
+                    syllables[0] = 'ˈɣ' + first_syl[2:]
+                elif first_syl.startswith('ɾ') or first_syl.startswith('r') or first_syl.startswith('R'):
+                    syllables[0] = 'ɣ' + first_syl[1:]
+
+        syllables = apply_dialect_rules(syllables, dialect, features)
+
+        if features.get('showSyllables', True):
+            results.append('.'.join(syllables))
+        else:
+            results.append(''.join(syllables))
+
+    return f"[{' '.join(results)}]"
+
 # -------------------------- ASR Model --------------------------
 
 _asr_model = None
@@ -1380,14 +1668,16 @@ def create_app():
                 )
 
                 gr.Markdown("### 🎨 Quick Actions")
+                save_colors_btn = gr.Button("💾 Save Colors", variant="primary")
+                save_status = gr.Textbox(label="Save Status", value="", interactive=False, lines=1, visible=False)
                 update_preview_btn = gr.Button("🔄 Update Preview")
                 clear_formatting_btn = gr.Button("🧹 Clear All Formatting")
 
                 gr.Markdown("---")
-                gr.Markdown("### 🔗 Acentos Program Integration")
-                gr.Markdown("*Auto-transcribe to IPA using your acentos program*")
+                gr.Markdown("### 🔗 Acentos IPA Transcription")
+                gr.Markdown("*Auto-transcribe to IPA using integrated dialect rules*")
 
-                acentos_status = gr.Textbox(label="Acentos API Status", value="Not connected", interactive=False, lines=1)
+                acentos_status = gr.Textbox(label="IPA Transcription Status", value="Ready", interactive=False, lines=1)
 
                 gr.Markdown("**Quick IPA Transcription:**")
                 with gr.Row():
@@ -1524,6 +1814,23 @@ def create_app():
             fn=update_preview_display,
             inputs=[edited_words_state],
             outputs=[preview_html]
+        )
+
+        def save_colors_from_editor(editor_html_content, original_words):
+            """Save colors from the editor to the word state"""
+            if not editor_html_content or not original_words:
+                return original_words, gr.update(value="❌ No changes to save", visible=True)
+
+            try:
+                updated_words = parse_editor_html_colors(editor_html_content, original_words)
+                return updated_words, gr.update(value="✅ Colors saved! Ready to export.", visible=True)
+            except Exception as e:
+                return original_words, gr.update(value=f"❌ Error: {e}", visible=True)
+
+        save_colors_btn.click(
+            fn=save_colors_from_editor,
+            inputs=[editor_content_state, edited_words_state],
+            outputs=[edited_words_state, save_status]
         )
 
         def clear_all_formatting(words):
@@ -1763,44 +2070,23 @@ def create_app():
             outputs=[edited_words_state]
         )
 
-        # Acentos API Transcription Handlers
-        ACENTOS_API_URL = "http://localhost:5000"
-
-        def call_acentos_api(text, dialect):
-            """Call the acentos API to transcribe Spanish text to IPA"""
-            import requests
-            try:
-                response = requests.post(
-                    f"{ACENTOS_API_URL}/transcribe",
-                    json={"text": text, "dialect": dialect},
-                    timeout=5
-                )
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    return {"error": f"API returned status {response.status_code}"}
-            except requests.exceptions.ConnectionError:
-                return {"error": "Cannot connect to acentos server. Is it running on port 5000?"}
-            except Exception as e:
-                return {"error": str(e)}
+        # Acentos IPA Transcription Handlers (Integrated)
 
         def transcribe_to_ipa(edited_words, dialect_name, dialect_id):
-            """Transcribe lyrics to IPA using acentos API"""
+            """Transcribe lyrics to IPA using integrated acentos logic"""
             if not edited_words:
                 return edited_words, f"❌ No lyrics to transcribe. Transcribe audio first."
 
-            # Extract all text
-            text = " ".join([w["text"] for w in edited_words])
+            try:
+                # Extract all text
+                text = " ".join([w["text"] for w in edited_words])
 
-            # Call acentos API
-            result = call_acentos_api(text, dialect_id)
+                # Call integrated IPA transcription function
+                ipa_text = transcribe_to_ipa_internal(text, dialect_id)
 
-            if "error" in result:
-                return edited_words, f"❌ Error: {result['error']}"
-
-            # For now, just show success - full integration coming
-            ipa_text = result.get("ipa", "")
-            return edited_words, f"✅ Transcribed to {dialect_name} IPA: {ipa_text}"
+                return edited_words, f"✅ Transcribed to {dialect_name} IPA: {ipa_text}"
+            except Exception as e:
+                return edited_words, f"❌ Error: {str(e)}"
 
         transcribe_dominican_btn.click(
             fn=lambda words: transcribe_to_ipa(words, "Dominican", "dominican"),
