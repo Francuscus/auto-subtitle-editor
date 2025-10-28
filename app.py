@@ -1,24 +1,25 @@
 # Language Learning Subtitle Editor
-# Version 2.3 — v2.2 + ZIP-ed HTML import + Burn-to-MP4
+# Version 2.3 — HTML/ZIP import + ASS/SRT + Burn MP4 from Audio
 # Banner Color: #00BCD4 (Cyan)
 
 import os
 import re
 import tempfile
-import zipfile
 from typing import List, Tuple, Optional
+import zipfile
+import pathlib
+import subprocess
+import shutil
 
 import gradio as gr
 import torch
 import whisperx
-import subprocess
-import shutil
 
 # -------------------------- Config --------------------------
 
 VERSION = "2.3"
-BANNER_COLOR = "#00BCD4"            # top banner color
-DEFAULT_SAMPLE_TEXT_COLOR = "#1e88e5"  # blue (so it isn't white-on-white)
+BANNER_COLOR = "#00BCD4"  # Cyan banner
+DEFAULT_SAMPLE_TEXT_COLOR = "#1e88e5"  # Blue so it isn't white-on-white
 
 LANG_MAP = {
     "auto": None, "auto-detect": None, "automatic": None,
@@ -63,7 +64,7 @@ def get_asr_model():
 
     use_cuda = torch.cuda.is_available()
     device = "cuda" if use_cuda else "cpu"
-    compute = "float16" if use_cuda else "int8"  # CPU int8; fast & safe
+    compute = "float16" if use_cuda else "int8"  # CPU int8; safe + fast
 
     print(f"[v{VERSION}] Loading WhisperX on {device} with compute_type={compute}")
     try:
@@ -192,8 +193,7 @@ def _css_color_to_hex(style: str) -> Optional[str]:
         return f"#{r:02X}{g:02X}{b:02X}"
     return None
 
-def import_from_html(html_path: str, original_words: List[dict]) -> List[dict]:
-    """Parse edited HTML and map text/colors back to original word timings."""
+def _parse_html_words(html_text: str) -> List[Tuple[str, Optional[str]]]:
     from html.parser import HTMLParser
 
     class Parser(HTMLParser):
@@ -239,36 +239,44 @@ def import_from_html(html_path: str, original_words: List[dict]) -> List[dict]:
                     color = DEFAULT_SAMPLE_TEXT_COLOR
                 self.words.append((tok, color))
 
+    p = Parser()
+    p.feed(html_text)
+    return p.words
+
+def import_from_html(html_path: str, original_words: List[dict]) -> List[dict]:
     with open(html_path, "r", encoding="utf-8") as f:
         html = f.read()
-
-    p = Parser()
-    p.feed(html)
+    parsed = _parse_html_words(html)
 
     edited = []
     for i, ow in enumerate(original_words):
-        if i < len(p.words):
-            txt, col = p.words[i]
+        if i < len(parsed):
+            txt, col = parsed[i]
             edited.append({"start": ow["start"], "end": ow["end"], "text": txt, "color": col})
         else:
             edited.append({"start": ow["start"], "end": ow["end"], "text": ow["text"], "color": DEFAULT_SAMPLE_TEXT_COLOR})
     return edited
 
-def import_from_zip_html(zip_path: str, original_words: List[dict]) -> List[dict]:
-    """Accept a Google Docs 'Web page (.zip)' export; extract first HTML and parse."""
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        html_name = None
-        for n in zf.namelist():
-            if n.lower().endswith((".html", ".htm")):
-                html_name = n
-                break
-        if not html_name:
+def import_from_zip(zip_path: str, original_words: List[dict]) -> List[dict]:
+    # Find first .html/.htm inside and parse it
+    with zipfile.ZipFile(zip_path, "r") as z:
+        html_names = [n for n in z.namelist() if n.lower().endswith((".html", ".htm"))]
+        if not html_names:
             raise ValueError("No .html file found inside the ZIP.")
-        tmpdir = tempfile.mkdtemp()
-        out_html = os.path.join(tmpdir, os.path.basename(html_name))
-        with zf.open(html_name) as src, open(out_html, "wb") as dst:
-            dst.write(src.read())
-    return import_from_html(out_html, original_words)
+        # Prefer top-level or the first one
+        name = sorted(html_names, key=lambda x: (x.count("/"), len(x)))[0]
+        with z.open(name) as f:
+            html = f.read().decode("utf-8", errors="ignore")
+    parsed = _parse_html_words(html)
+
+    edited = []
+    for i, ow in enumerate(original_words):
+        if i < len(parsed):
+            txt, col = parsed[i]
+            edited.append({"start": ow["start"], "end": ow["end"], "text": txt, "color": col})
+        else:
+            edited.append({"start": ow["start"], "end": ow["end"], "text": ow["text"], "color": DEFAULT_SAMPLE_TEXT_COLOR})
+    return edited
 
 # -------------------------- SubRip (SRT) / ASS --------------------------
 
@@ -277,8 +285,8 @@ def export_to_srt(words: List[dict], words_per_line: int = 5) -> str:
     while i < len(words):
         chunk = words[i:i + words_per_line]
         start = seconds_to_timestamp_srt(chunk[0]["start"])
-        end   = seconds_to_timestamp_srt(chunk[-1]["end"])
-        text  = " ".join(w["text"] for w in chunk)
+        end = seconds_to_timestamp_srt(chunk[-1]["end"])
+        text = " ".join(w["text"] for w in chunk)
         out.append(f"{n}\n{start} --> {end}\n{text}\n")
         i += words_per_line; n += 1
     return "\n".join(out)
@@ -310,7 +318,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     while i < len(words):
         chunk = words[i:i + words_per_line]
         start = seconds_to_timestamp_ass(chunk[0]["start"])
-        end   = seconds_to_timestamp_ass(chunk[-1]["end"])
+        end = seconds_to_timestamp_ass(chunk[-1]["end"])
         parts = []
         for w in chunk:
             col = _hex_to_ass_bgr(w.get("color", DEFAULT_SAMPLE_TEXT_COLOR))
@@ -327,32 +335,108 @@ def _save_temp(content: str, ext: str) -> str:
         f.write(content)
     return path
 
-# -------------------------- Burn to MP4 --------------------------
+# -------------------------- FFmpeg helpers (burn to MP4) --------------------------
 
-def burn_ass_to_mp4(input_video_path: str, ass_path: str) -> str:
-    if not shutil.which("ffmpeg"):
-        raise RuntimeError("ffmpeg not found in PATH.")
-    if not os.path.exists(input_video_path):
-        raise FileNotFoundError("Video file not found.")
-    if not os.path.exists(ass_path):
-        raise FileNotFoundError(".ASS subtitle file not found.")
+def _ffprobe_duration(path: str) -> float:
+    """Return media duration in seconds using ffprobe."""
+    if not shutil.which("ffprobe"):
+        return 0.0
+    cmd = [
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", path
+    ]
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        return float((p.stdout or "0").strip())
+    except:
+        return 0.0
 
-    tmpdir = tempfile.mkdtemp()
-    out_path = os.path.join(tmpdir, "subtitled.mp4")
+def _escape_ass_for_filter(p: str) -> str:
+    """
+    Escape a filesystem path for ffmpeg's subtitles filter.
+    """
+    p = str(pathlib.Path(p).resolve())
+    p = p.replace("\\", "\\\\").replace(":", "\\:")
+    return "'" + p.replace("'", r"'\''") + "'"
 
-    # NOTE: Using libx264 for broad compatibility; copy audio stream.
-    # If your ffmpeg lacks libass subtitle filter on the host, this will fail.
+def _make_color_canvas(out_path: str, width: int, height: int, seconds: float, bg_hex: str, fps: int = 30):
+    """
+    Create a solid-color video of given duration.
+    """
+    if not bg_hex or not bg_hex.startswith("#") or len(bg_hex) != 7:
+        bg_hex = "#000000"
+    color_arg = "0x" + bg_hex[1:]
+    duration = max(0.1, seconds)
+
     cmd = [
         "ffmpeg", "-y",
-        "-i", input_video_path,
-        "-vf", f"subtitles={ass_path}",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-        "-c:a", "copy",
+        "-f", "lavfi", "-i", f"color={color_arg}:s={width}x{height}:r={fps}",
+        "-t", f"{duration:.3f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         out_path,
     ]
-    print("[ffmpeg]", " ".join(cmd))
-    subprocess.run(cmd, check=True)
-    return out_path
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+def burn_ass_on_canvas_with_audio(audio_path: str, ass_path: str, bg_hex="#000000", size="1280x720", fps=30) -> tuple[Optional[str], str]:
+    """
+    Create a solid-color canvas matching the audio duration, burn ASS on it, and mux audio -> MP4.
+    Returns (mp4_path or None, log).
+    """
+    if not shutil.which("ffmpeg"):
+        return None, "ffmpeg not found."
+
+    if not os.path.exists(audio_path):
+        return None, "Audio file not found."
+    if not os.path.exists(ass_path):
+        return None, "ASS file not found."
+
+    try:
+        w, h = [int(x) for x in size.lower().split("x")]
+    except:
+        w, h = 1280, 720
+
+    dur = _ffprobe_duration(audio_path)
+    if dur <= 0:
+        return None, "Could not read audio duration (ffprobe)."
+
+    tmpdir = tempfile.mkdtemp()
+    canvas_mp4 = os.path.join(tmpdir, "canvas.mp4")
+    out_mp4 = os.path.join(tmpdir, "subtitled.mp4")
+
+    # 1) make canvas
+    p1 = _make_color_canvas(canvas_mp4, w, h, dur, bg_hex, fps)
+    if p1.returncode != 0 or not os.path.exists(canvas_mp4):
+        return None, "Failed to create canvas:\n" + (p1.stderr or "")
+
+    # 2) burn subtitles on canvas
+    ass_escaped = _escape_ass_for_filter(ass_path)
+    burned_mp4 = os.path.join(tmpdir, "burned.mp4")
+    cmd_burn = [
+        "ffmpeg", "-y",
+        "-i", canvas_mp4,
+        "-vf", f"subtitles={ass_escaped}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-an",
+        burned_mp4
+    ]
+    p2 = subprocess.run(cmd_burn, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if p2.returncode != 0 or not os.path.exists(burned_mp4):
+        return None, "Burn step failed (subtitles filter missing?).\n" + (p2.stderr or "")
+
+    # 3) mux original audio with the burned video
+    cmd_mux = [
+        "ffmpeg", "-y",
+        "-i", burned_mp4, "-i", audio_path,
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        "-shortest",
+        out_mp4
+    ]
+    p3 = subprocess.run(cmd_mux, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if p3.returncode != 0 or not os.path.exists(out_mp4):
+        return None, "Mux step failed:\n" + (p3.stderr or "")
+
+    return out_mp4, "✅ Created MP4 with burned subs and original audio."
 
 # -------------------------- Gradio App --------------------------
 
@@ -370,14 +454,13 @@ def create_app():
 
         # States
         word_segments_state = gr.State([])     # original words (timestamps)
-        edited_words_state  = gr.State([])     # edited (with colors)
-        last_ass_state      = gr.State("")     # path to most recent .ass we exported
+        edited_words_state = gr.State([])      # edited (with colors)
         status_box = gr.Textbox(label="Status", value="Ready.", interactive=False, lines=3)
 
         # ---- Step 1: Transcribe ----
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### 1) Transcribe Audio or Video")
+                gr.Markdown("### 1) Transcribe Audio")
                 audio_input = gr.Audio(label="Upload Audio/Video", type="filepath")
                 language_dropdown = gr.Dropdown(
                     choices=[("Auto-detect", "auto"), ("Spanish", "es"), ("Hungarian", "hu"), ("English", "en")],
@@ -387,42 +470,27 @@ def create_app():
                 transcribe_btn = gr.Button("Transcribe", variant="primary", size="lg")
                 transcript_preview = gr.Textbox(label="Transcript Preview", lines=8, interactive=False)
 
-        # ---- Step 2: Popup-style HTML Generator ----
+        # ---- Step 2: Download Editable HTML ----
         with gr.Row():
             with gr.Column():
                 gr.Markdown("### 2) Download Editable HTML")
-                open_gen_btn = gr.Button("Open HTML Generator", size="lg")
-                with gr.Group(visible=False) as html_modal:
-                    gr.Markdown("#### HTML Generator")
-                    gr.Markdown(
-                        "- Creates an **editable HTML** containing all words.\n"
-                        "- Edit it in Word / Google Docs / Browser, change **colors** and **text**.\n"
-                        "- Save it as **.html** (or Google Docs ‘Web page (.zip)’) and upload in Step 3."
-                    )
-                    build_html_btn = gr.Button("Build & Download HTML", variant="primary")
-                    close_gen_btn = gr.Button("Close")
-                    html_file = gr.File(label="Your HTML file")
+                download_html_btn = gr.Button("Build & Download HTML", size="lg")
+                html_file = gr.File(label="Your HTML file")
 
-        # ---- Step 3: Import (HTML or ZIP) ----
+        # ---- Step 3: Upload Edited HTML (supports .html/.htm/.zip) ----
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### 3) Upload Edited HTML")
-                upload_html = gr.File(
-                    label="Upload your edited HTML (.html/.htm) or Google Docs ZIP (.zip)",
-                    file_types=[".html", ".htm", ".zip"]
-                )
+                gr.Markdown("### 3) Upload Edited HTML (or Google Docs ZIP)")
+                upload_html = gr.File(label="Upload .html / .htm / .zip", file_types=[".html", ".htm", ".zip"])
                 import_btn = gr.Button("Import Edited File", variant="primary", size="lg")
                 import_status = gr.Textbox(label="Import Status", interactive=False, lines=3)
 
-        # ---- Step 4: Export ----
+        # ---- Step 4: Export Subtitles ----
         with gr.Row():
             with gr.Column():
                 gr.Markdown("### 4) Export Subtitles")
                 with gr.Row():
-                    words_per = gr.Slider(
-                        minimum=2, maximum=10, value=5, step=1,
-                        label="Words per subtitle line"
-                    )
+                    words_per = gr.Slider(minimum=2, maximum=10, value=5, step=1, label="Words per subtitle line")
                     font_family = gr.Dropdown(
                         choices=["Arial", "Times New Roman", "Courier New", "Georgia", "Verdana"],
                         value="Arial", label="Font"
@@ -434,24 +502,32 @@ def create_app():
                 srt_file = gr.File(label="SRT File")
                 ass_file = gr.File(label="ASS File")
 
-        # ---- Step 5: Burn to MP4 ----
+        # ---- Step 5: Make MP4 from Audio + ASS ----
         with gr.Row():
             with gr.Column():
-                gr.Markdown("### 5) Burn Subtitles to MP4")
-                video_for_burn = gr.Video(label="Upload the video to burn into")
-                ass_for_burn   = gr.File(label="Use exported .ASS (optional — leave empty to use latest)")
-                burn_btn       = gr.Button("Burn .ASS into MP4", variant="primary")
-                burned_mp4     = gr.File(label="Subtitled MP4")
+                gr.Markdown("### 5) Make MP4 from **Audio + ASS** (burned)")
+                audio_for_burn = gr.Audio(label="Audio (MP3/WAV)", type="filepath")
+                ass_for_burn = gr.File(label=".ASS subtitles (use your exported ASS)")
+                bg_color = gr.ColorPicker(value="#000000", label="Background color")
+                size_dd = gr.Dropdown(
+                    choices=["1280x720", "1920x1080", "1080x1920", "1080x1080"],
+                    value="1280x720",
+                    label="Canvas size"
+                )
+                fps_slider = gr.Slider(minimum=24, maximum=60, value=30, step=1, label="FPS")
+
+                make_mp4_btn = gr.Button("Make MP4 from Audio + ASS", variant="primary")
+                burned_out = gr.File(label="Burned MP4")
+                burn_log = gr.Textbox(label="Burn Log", interactive=False)
 
         # ---------- Handlers ----------
 
-        # Step 1 — Transcribe
         def do_transcribe(audio_path, lang_sel):
             if not audio_path:
-                return "❌ Error: no audio/video file provided.", [], ""
+                return "❌ Error: no audio file provided.", [], ""
             try:
                 lang_code = normalize_lang(lang_sel)
-                msg = f"Loading model…  Language: {lang_sel}"
+                msg = f"Loading model…\nLanguage: {lang_sel}"
                 yield msg, [], ""
                 words = transcribe_with_words(audio_path, lang_code)
                 preview = " ".join(w["text"] for w in words[:120])
@@ -467,55 +543,47 @@ def create_app():
             outputs=[status_box, word_segments_state, transcript_preview]
         )
 
-        # Modal toggle
-        def toggle_modal(open_flag):
-            return gr.update(visible=open_flag)
-
-        open_gen_btn.click(fn=lambda: toggle_modal(True), inputs=None, outputs=html_modal)
-        close_gen_btn.click(fn=lambda: toggle_modal(False), inputs=None, outputs=html_modal)
-
-        # Step 2 — Build HTML
         def handle_build_html(words):
             if not words:
+                gr.Warning("Transcribe first.")
                 return None
             try:
                 path = export_to_html_for_editing(words)
                 return path
             except Exception as e:
-                print("Error creating HTML:", e)
+                gr.Warning(f"Error creating HTML: {e}")
                 return None
 
-        build_html_btn.click(
+        download_html_btn.click(
             fn=handle_build_html,
             inputs=[word_segments_state],
             outputs=[html_file]
         )
 
-        # Step 3 — Import (HTML or ZIP)
-        def handle_import_html(file, original_words):
+        def handle_import(file, original_words):
             if not file:
                 return "❌ No file uploaded.", []
             if not original_words:
                 return "❌ Transcribe first.", []
             try:
-                name = file.name.lower()
-                if name.endswith(".zip"):
-                    edited = import_from_zip_html(file.name, original_words)
+                name = getattr(file, "name", "")
+                if name.lower().endswith(".zip"):
+                    edited = import_from_zip(name, original_words)
                 else:
-                    edited = import_from_html(file.name, original_words)
+                    edited = import_from_html(name, original_words)
                 return f"✅ Imported {len(edited)} words with colors.", edited
             except Exception as e:
-                return f"❌ Error importing: {e}", []
+                return f"❌ Error importing file: {e}", []
 
         import_btn.click(
-            fn=handle_import_html,
+            fn=handle_import,
             inputs=[upload_html, word_segments_state],
             outputs=[import_status, edited_words_state]
         )
 
-        # Step 4 — Export SRT/ASS
         def handle_export_srt(edited_words, n_words):
             if not edited_words:
+                gr.Warning("Import your edited HTML first.")
                 return None
             srt = export_to_srt(edited_words, int(n_words))
             return _save_temp(srt, ".srt")
@@ -528,40 +596,30 @@ def create_app():
 
         def handle_export_ass(edited_words, n_words, font, size):
             if not edited_words:
-                return None, ""
+                gr.Warning("Import your edited HTML first.")
+                return None
             ass = export_to_ass(edited_words, int(n_words), font, int(size))
-            path = _save_temp(ass, ".ass")
-            return path, path
+            return _save_temp(ass, ".ass")
 
         export_ass_btn.click(
             fn=handle_export_ass,
             inputs=[edited_words_state, words_per, font_family, font_size],
-            outputs=[ass_file, last_ass_state]
+            outputs=[ass_file]
         )
 
-        # Step 5 — Burn to MP4
-        def handle_burn(video_path, ass_upload, last_ass):
-            if not video_path:
-                return None
+        def handle_make_mp4(audio_path, ass_uploaded, bg_hex, size, fps):
             ass_path = ""
-            if ass_upload and getattr(ass_upload, "name", ""):
-                ass_path = ass_upload.name
-            elif last_ass:
-                ass_path = last_ass
-            else:
-                return None  # no .ass to burn
+            if ass_uploaded and getattr(ass_uploaded, "name", ""):
+                ass_path = ass_uploaded.name
+            if not ass_path:
+                return None, "❌ Provide an .ASS file (export it in Step 4)."
+            out, log = burn_ass_on_canvas_with_audio(audio_path, ass_path, bg_hex, size, int(fps))
+            return out, log
 
-            try:
-                out_mp4 = burn_ass_to_mp4(video_path, ass_path)
-                return out_mp4
-            except Exception as e:
-                print("Burn error:", e)
-                return None
-
-        burn_btn.click(
-            fn=handle_burn,
-            inputs=[video_for_burn, ass_for_burn, last_ass_state],
-            outputs=[burned_mp4]
+        make_mp4_btn.click(
+            fn=handle_make_mp4,
+            inputs=[audio_for_burn, ass_for_burn, bg_color, size_dd, fps_slider],
+            outputs=[burned_out, burn_log]
         )
 
         return demo
