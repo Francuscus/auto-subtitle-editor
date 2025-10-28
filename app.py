@@ -685,6 +685,35 @@ function applyColor(color) {
     onEditorChange();
 }
 
+// Apply IPA accent to selected text
+function applyAccent(accentNum, accentSymbol) {
+    const selection = window.getSelection();
+    if (!selection.rangeCount || !accentSymbol) return;
+
+    const range = selection.getRangeAt(0);
+    const selectedText = range.toString();
+
+    if (!selectedText) {
+        alert('Please select some text first to apply the accent.');
+        return;
+    }
+
+    // Insert the accent symbol after the selected text
+    // This preserves the selection and adds the IPA accent
+    const newText = selectedText + accentSymbol;
+
+    // Replace selection with text + accent
+    range.deleteContents();
+    const textNode = document.createTextNode(newText);
+    range.insertNode(textNode);
+
+    // Update editor content
+    onEditorChange();
+
+    // Log for debugging
+    console.log('Applied accent', accentNum, ':', accentSymbol, 'to', selectedText);
+}
+
 // Apply font size to selected text
 function applyFontSize(size) {
     const selection = window.getSelection();
@@ -861,6 +890,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Make functions globally accessible
 window.applyColor = applyColor;
+window.applyAccent = applyAccent;
 window.applyFontSize = applyFontSize;
 window.togglePlayback = togglePlayback;
 window.getEditorHTML = getEditorHTML;
@@ -906,6 +936,28 @@ def create_app():
                 transcribe_btn = gr.Button("🎵 Transcribe Audio", variant="primary", size="lg")
 
                 gr.Markdown("---")
+                gr.Markdown("### 🎯 IPA Accent Configuration")
+                gr.Markdown("*Configure your 4 custom accents (will sync with acentos program)*")
+
+                with gr.Row():
+                    accent1_label = gr.Textbox(label="Accent 1 Label", value="Accent 1", scale=1)
+                    accent1_symbol = gr.Textbox(label="Symbol/Text", value="́", scale=1, placeholder="e.g., ́ or ˈ")
+
+                with gr.Row():
+                    accent2_label = gr.Textbox(label="Accent 2 Label", value="Accent 2", scale=1)
+                    accent2_symbol = gr.Textbox(label="Symbol/Text", value="̀", scale=1, placeholder="e.g., ̀ or ˌ")
+
+                with gr.Row():
+                    accent3_label = gr.Textbox(label="Accent 3 Label", value="Accent 3", scale=1)
+                    accent3_symbol = gr.Textbox(label="Symbol/Text", value="̂", scale=1, placeholder="e.g., ̂ or ː")
+
+                with gr.Row():
+                    accent4_label = gr.Textbox(label="Accent 4 Label", value="Accent 4", scale=1)
+                    accent4_symbol = gr.Textbox(label="Symbol/Text", value="̃", scale=1, placeholder="e.g., ̃ or ʰ")
+
+                update_accents_btn = gr.Button("Update Accent Buttons", size="sm")
+
+                gr.Markdown("---")
                 gr.Markdown("### ⚙️ Settings")
 
                 words_per = gr.Slider(minimum=1, maximum=15, value=5, step=1, label="Words per line")
@@ -938,9 +990,10 @@ def create_app():
                 )
 
                 gr.Markdown("### ✏️ Edit Lyrics")
-                # Toolbar
-                toolbar_html = gr.HTML(
-                    """
+                # Toolbar (will be updated dynamically with accent buttons)
+                def create_toolbar_html(a1_label="Accent 1", a1_sym="́", a2_label="Accent 2", a2_sym="̀",
+                                       a3_label="Accent 3", a3_sym="̂", a4_label="Accent 4", a4_sym="̃"):
+                    return f"""
                     <div id="editor-toolbar">
                         <div style="font-weight: bold; margin-right: 8px;">Format:</div>
                         <button class="toolbar-btn" onclick="applyColor('#FF0000')" title="Red">
@@ -969,9 +1022,24 @@ def create_app():
                         <button class="toolbar-btn" onclick="applyFontSize(36)" title="Medium">Medium</button>
                         <button class="toolbar-btn" onclick="applyFontSize(48)" title="Large">Large</button>
                         <button class="toolbar-btn" onclick="applyFontSize(72)" title="Extra Large">XL</button>
+                        <div style="width: 1px; height: 30px; background: #ddd; margin: 0 8px;"></div>
+                        <div style="font-weight: bold; margin: 0 8px;">IPA Accents:</div>
+                        <button class="toolbar-btn" onclick="applyAccent(1, '{a1_sym}')" title="{a1_label}">
+                            {a1_label}
+                        </button>
+                        <button class="toolbar-btn" onclick="applyAccent(2, '{a2_sym}')" title="{a2_label}">
+                            {a2_label}
+                        </button>
+                        <button class="toolbar-btn" onclick="applyAccent(3, '{a3_sym}')" title="{a3_label}">
+                            {a3_label}
+                        </button>
+                        <button class="toolbar-btn" onclick="applyAccent(4, '{a4_sym}')" title="{a4_label}">
+                            {a4_label}
+                        </button>
                     </div>
                     """
-                )
+
+                toolbar_html = gr.HTML(create_toolbar_html())
 
                 # Rich text editor
                 editor_html = gr.HTML(
@@ -992,6 +1060,22 @@ def create_app():
                 gr.Markdown("### 🎨 Quick Actions")
                 update_preview_btn = gr.Button("🔄 Update Preview")
                 clear_formatting_btn = gr.Button("🧹 Clear All Formatting")
+
+                gr.Markdown("---")
+                gr.Markdown("### 🔗 Acentos Program Integration")
+                gr.Markdown("*Import/Export to sync with your IPA acentos program*")
+
+                with gr.Row():
+                    export_config_btn = gr.Button("📤 Export Config", size="sm")
+                    import_config_btn = gr.Button("📥 Import Config", size="sm")
+
+                config_file = gr.File(label="Accent Configuration (JSON)")
+
+                with gr.Row():
+                    export_lyrics_btn = gr.Button("📤 Export Lyrics+Timing", size="sm")
+                    import_lyrics_btn = gr.Button("📥 Import Lyrics+Timing", size="sm")
+
+                lyrics_file = gr.File(label="Accented Lyrics (JSON)")
 
         # Timeline at the bottom
         gr.Markdown("---")
@@ -1074,6 +1158,17 @@ def create_app():
             fn=do_transcribe,
             inputs=[audio_input, language_dropdown],
             outputs=[status_box, word_segments_state, edited_words_state, transcript_preview, editor_html, audio_state]
+        )
+
+        def update_accent_buttons(a1_label, a1_sym, a2_label, a2_sym, a3_label, a3_sym, a4_label, a4_sym):
+            """Update the toolbar with new accent button labels and symbols"""
+            return create_toolbar_html(a1_label, a1_sym, a2_label, a2_sym, a3_label, a3_sym, a4_label, a4_sym)
+
+        update_accents_btn.click(
+            fn=update_accent_buttons,
+            inputs=[accent1_label, accent1_symbol, accent2_label, accent2_symbol,
+                   accent3_label, accent3_symbol, accent4_label, accent4_symbol],
+            outputs=[toolbar_html]
         )
 
         def update_preview_display(words):
@@ -1161,6 +1256,122 @@ def create_app():
             fn=handle_export_mp4,
             inputs=[audio_state, edited_words_state, words_per, font_family, font_size, bg_color, size_dd],
             outputs=[exported_video, status_box]
+        )
+
+        # Acentos Integration Handlers
+        def export_accent_config(a1_label, a1_sym, a2_label, a2_sym, a3_label, a3_sym, a4_label, a4_sym):
+            """Export accent configuration as JSON for acentos program"""
+            import json
+            config = {
+                "version": "1.0",
+                "accents": [
+                    {"id": 1, "label": a1_label, "symbol": a1_sym},
+                    {"id": 2, "label": a2_label, "symbol": a2_sym},
+                    {"id": 3, "label": a3_label, "symbol": a3_sym},
+                    {"id": 4, "label": a4_label, "symbol": a4_sym}
+                ]
+            }
+            tmpdir = tempfile.mkdtemp()
+            path = os.path.join(tmpdir, "accent_config.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            return path
+
+        export_config_btn.click(
+            fn=export_accent_config,
+            inputs=[accent1_label, accent1_symbol, accent2_label, accent2_symbol,
+                   accent3_label, accent3_symbol, accent4_label, accent4_symbol],
+            outputs=[config_file]
+        )
+
+        def import_accent_config(config_json_file):
+            """Import accent configuration from acentos program"""
+            import json
+            if not config_json_file:
+                gr.Warning("Please upload a config file first.")
+                return ["Accent 1", "́", "Accent 2", "̀", "Accent 3", "̂", "Accent 4", "̃"]
+
+            try:
+                with open(config_json_file.name, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+
+                accents = config.get("accents", [])
+                results = []
+                for i in range(4):
+                    if i < len(accents):
+                        results.append(accents[i].get("label", f"Accent {i+1}"))
+                        results.append(accents[i].get("symbol", ""))
+                    else:
+                        results.append(f"Accent {i+1}")
+                        results.append("")
+                return results
+            except Exception as e:
+                gr.Warning(f"Error importing config: {e}")
+                return ["Accent 1", "́", "Accent 2", "̀", "Accent 3", "̂", "Accent 4", "̃"]
+
+        import_config_btn.click(
+            fn=import_accent_config,
+            inputs=[config_file],
+            outputs=[accent1_label, accent1_symbol, accent2_label, accent2_symbol,
+                    accent3_label, accent3_symbol, accent4_label, accent4_symbol]
+        )
+
+        def export_lyrics_with_timing(edited_words):
+            """Export lyrics with IPA accents and timing data as JSON"""
+            import json
+            if not edited_words:
+                gr.Warning("No lyrics to export. Transcribe first.")
+                return None
+
+            data = {
+                "version": "1.0",
+                "words": []
+            }
+
+            for w in edited_words:
+                word_data = {
+                    "start": w["start"],
+                    "end": w["end"],
+                    "text": w["text"],
+                    "color": w.get("color", DEFAULT_SAMPLE_TEXT_COLOR)
+                }
+                if "html" in w and w["html"]:
+                    word_data["html"] = w["html"]
+                data["words"].append(word_data)
+
+            tmpdir = tempfile.mkdtemp()
+            path = os.path.join(tmpdir, "lyrics_with_timing.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            return path
+
+        export_lyrics_btn.click(
+            fn=export_lyrics_with_timing,
+            inputs=[edited_words_state],
+            outputs=[lyrics_file]
+        )
+
+        def import_lyrics_with_timing(lyrics_json_file):
+            """Import lyrics with IPA accents and timing from acentos program"""
+            import json
+            if not lyrics_json_file:
+                gr.Warning("Please upload a lyrics file first.")
+                return []
+
+            try:
+                with open(lyrics_json_file.name, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                words = data.get("words", [])
+                return words
+            except Exception as e:
+                gr.Warning(f"Error importing lyrics: {e}")
+                return []
+
+        import_lyrics_btn.click(
+            fn=import_lyrics_with_timing,
+            inputs=[lyrics_file],
+            outputs=[edited_words_state]
         )
 
         return demo
