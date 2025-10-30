@@ -1,6 +1,6 @@
 # Language Learning Subtitle Editor
-# Version 4.3 — IPA Letter-Level Coloring, Timing Offset Fixed
-# Banner Color: #F57C00 (Orange)
+# Version 4.4 — Third Person Verbs Fixed, Custom Color Picker
+# Banner Color: #9C27B0 (Purple)
 
 import os
 import re
@@ -17,8 +17,8 @@ import whisperx
 
 # -------------------------- Config --------------------------
 
-VERSION = "4.3"
-BANNER_COLOR = "#F57C00"  # Orange banner (v4.3 - IPA letter-level coloring, timing offset)
+VERSION = "4.4"
+BANNER_COLOR = "#9C27B0"  # Purple banner (v4.4 - third person verbs, custom color picker)
 DEFAULT_SAMPLE_TEXT_COLOR = "#1e88e5"  # Blue so it isn't white-on-white
 
 LANG_MAP = {
@@ -441,9 +441,9 @@ def passes_verb_gate(word, prev_word=None, next_word=None, is_first=False):
         # "hablo", "como" YES, but "yo", "no", "como" (noun) need context
         has_verb_ending = True
     elif word_lower.endswith(('a', 'e')) and len(word_lower) >= 4:
-        # "habla", "come" YES, but "casa", "clase" need checking
-        # Only pass if we have positive context
-        has_verb_ending = False  # Will check context below
+        # "habla", "come" YES, but "casa", "clase" might slip through
+        # Allow these through since articles/determiners already filtered out most nouns
+        has_verb_ending = True
 
     if not has_verb_ending:
         return False
@@ -1917,6 +1917,16 @@ def create_app():
                         <button class="toolbar-btn" onclick="applyColor('#000000')" title="Black">
                             <span style="color: #000000;">●</span> Black
                         </button>
+                        <button class="toolbar-btn" onclick="applyColor('#1e88e5')" title="Default Blue" style="background: #1e88e5; color: white;">
+                            <span style="color: #FFF;">●</span> Default
+                        </button>
+                        <div style="width: 1px; height: 30px; background: #ddd; margin: 0 8px;"></div>
+                        <label style="display: inline-flex; align-items: center; margin: 0 4px;">
+                            <span style="margin-right: 4px; font-weight: bold;">Custom:</span>
+                            <input type="color" id="customColorPicker" value="#1e88e5"
+                                   style="width: 40px; height: 30px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer;"
+                                   onchange="applyColor(this.value)" title="Pick any color">
+                        </label>
                         <div style="width: 1px; height: 30px; background: #ddd; margin: 0 8px;"></div>
                         <button class="toolbar-btn" onclick="applyFontSize(24)" title="Small">Small</button>
                         <button class="toolbar-btn" onclick="applyFontSize(36)" title="Medium">Medium</button>
