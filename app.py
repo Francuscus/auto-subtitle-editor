@@ -1,6 +1,6 @@
 # Language Learning Subtitle Editor
-# Version 4.2 — Color Editor Fixes, IPA Coloring, Timing Offset
-# Banner Color: #43A047 (Green)
+# Version 4.3 — IPA Letter-Level Coloring, Timing Offset Fixed
+# Banner Color: #F57C00 (Orange)
 
 import os
 import re
@@ -17,8 +17,8 @@ import whisperx
 
 # -------------------------- Config --------------------------
 
-VERSION = "4.2"
-BANNER_COLOR = "#43A047"  # Green banner (v4.2 - color editor fixes, IPA coloring, timing offset)
+VERSION = "4.3"
+BANNER_COLOR = "#F57C00"  # Orange banner (v4.3 - IPA letter-level coloring, timing offset)
 DEFAULT_SAMPLE_TEXT_COLOR = "#1e88e5"  # Blue so it isn't white-on-white
 
 LANG_MAP = {
