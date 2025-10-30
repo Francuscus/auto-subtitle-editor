@@ -1893,7 +1893,7 @@ def create_app():
                         <button class="toolbar-btn" onclick="applyColor('#FF0000')" title="Red">
                             <span style="color: #FF0000;">●</span> Red
                         </button>
-                        <button class="toolbar-btn" onclick="applyColor('#FFFF00')" title="Yellow" style="background: #FFFF00;">
+                        <button class="toolbar-btn" onclick="applyColor('#FFD700')" title="Yellow" style="background: #FFD700;">
                             <span style="color: #000;">●</span> Yellow
                         </button>
                         <button class="toolbar-btn" onclick="applyColor('#00FF00')" title="Green">
@@ -1913,6 +1913,9 @@ def create_app():
                         </button>
                         <button class="toolbar-btn" onclick="applyColor('#FFFFFF')" title="White">
                             <span style="color: #FFFFFF; text-shadow: 0 0 1px #000;">●</span> White
+                        </button>
+                        <button class="toolbar-btn" onclick="applyColor('#000000')" title="Black">
+                            <span style="color: #000000;">●</span> Black
                         </button>
                         <div style="width: 1px; height: 30px; background: #ddd; margin: 0 8px;"></div>
                         <button class="toolbar-btn" onclick="applyFontSize(24)" title="Small">Small</button>
@@ -2250,7 +2253,7 @@ def create_app():
                 print(f"Error parsing editor HTML: {e}")
                 return original_words
 
-        def handle_export_mp4(audio_path, edited_words, editor_html_content, n_words, font, size, alignment, bg_hex, canvas_size, timing_offset_ms=0):
+        def handle_export_mp4(audio_path, edited_words, editor_html_content, n_words, font, size, alignment, bg_hex, canvas_size, timing_offset_ms):
             """Export the final MP4 video with lyrics"""
             if not audio_path:
                 gr.Warning("Upload audio first.")
