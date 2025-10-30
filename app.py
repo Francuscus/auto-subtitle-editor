@@ -17,8 +17,8 @@ import whisperx
 
 # -------------------------- Config --------------------------
 
-VERSION = "3.2"
-BANNER_COLOR = "#E67E22"  # Carrot Orange banner
+VERSION = "4.1"
+BANNER_COLOR = "#1E88E5"  # Blue banner (v4.1 - verb ending colorizer)
 DEFAULT_SAMPLE_TEXT_COLOR = "#1e88e5"  # Blue so it isn't white-on-white
 
 LANG_MAP = {
