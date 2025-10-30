@@ -1,6 +1,6 @@
 # Language Learning Subtitle Editor
-# Version 3.2 — Verb Detection Gates (No More False Positives!)
-# Banner Color: #E67E22 (Carrot Orange)
+# Version 4.2 — Color Editor Fixes, IPA Coloring, Timing Offset
+# Banner Color: #43A047 (Green)
 
 import os
 import re
@@ -17,8 +17,8 @@ import whisperx
 
 # -------------------------- Config --------------------------
 
-VERSION = "4.1"
-BANNER_COLOR = "#1E88E5"  # Blue banner (v4.1 - verb ending colorizer)
+VERSION = "4.2"
+BANNER_COLOR = "#43A047"  # Green banner (v4.2 - color editor fixes, IPA coloring, timing offset)
 DEFAULT_SAMPLE_TEXT_COLOR = "#1e88e5"  # Blue so it isn't white-on-white
 
 LANG_MAP = {
@@ -1852,6 +1852,9 @@ def create_app():
                 )
                 font_size = gr.Slider(minimum=20, maximum=96, value=48, step=2, label="Font Size")
 
+                timing_offset = gr.Slider(minimum=-2000, maximum=2000, value=0, step=50, label="Timing Offset (ms)",
+                                         info="Shift lyrics earlier (negative) or later (positive)")
+
                 text_position = gr.Dropdown(
                     choices=[("Bottom", "2"), ("Center", "5"), ("Top", "8")],
                     value="2",
@@ -1890,7 +1893,7 @@ def create_app():
                         <button class="toolbar-btn" onclick="applyColor('#FF0000')" title="Red">
                             <span style="color: #FF0000;">●</span> Red
                         </button>
-                        <button class="toolbar-btn" onclick="applyColor('#FFFF00')" title="Yellow" style="background: #FFFF00;">
+                        <button class="toolbar-btn" onclick="applyColor('#FFD700')" title="Yellow" style="background: #FFD700;">
                             <span style="color: #000;">●</span> Yellow
                         </button>
                         <button class="toolbar-btn" onclick="applyColor('#00FF00')" title="Green">
@@ -1910,6 +1913,9 @@ def create_app():
                         </button>
                         <button class="toolbar-btn" onclick="applyColor('#FFFFFF')" title="White">
                             <span style="color: #FFFFFF; text-shadow: 0 0 1px #000;">●</span> White
+                        </button>
+                        <button class="toolbar-btn" onclick="applyColor('#000000')" title="Black">
+                            <span style="color: #000000;">●</span> Black
                         </button>
                         <div style="width: 1px; height: 30px; background: #ddd; margin: 0 8px;"></div>
                         <button class="toolbar-btn" onclick="applyFontSize(24)" title="Small">Small</button>
@@ -2247,7 +2253,7 @@ def create_app():
                 print(f"Error parsing editor HTML: {e}")
                 return original_words
 
-        def handle_export_mp4(audio_path, edited_words, editor_html_content, n_words, font, size, alignment, bg_hex, canvas_size):
+        def handle_export_mp4(audio_path, edited_words, editor_html_content, n_words, font, size, alignment, bg_hex, canvas_size, timing_offset_ms):
             """Export the final MP4 video with lyrics"""
             if not audio_path:
                 gr.Warning("Upload audio first.")
@@ -2260,6 +2266,14 @@ def create_app():
             try:
                 # Capture colors from editor HTML
                 updated_words = parse_editor_html_colors(editor_html_content, edited_words)
+
+                # Apply timing offset (convert milliseconds to seconds)
+                offset_seconds = timing_offset_ms / 1000.0
+                if offset_seconds != 0:
+                    updated_words = [
+                        {**w, 'start': max(0, w['start'] + offset_seconds), 'end': max(0, w['end'] + offset_seconds)}
+                        for w in updated_words
+                    ]
 
                 # Generate ASS subtitle file with alignment
                 ass_content = export_to_ass(updated_words, int(n_words), font, int(size), alignment)
@@ -2284,7 +2298,7 @@ def create_app():
 
         export_mp4_btn.click(
             fn=handle_export_mp4,
-            inputs=[audio_state, edited_words_state, editor_content_state, words_per, font_family, font_size, text_position, bg_color, size_dd],
+            inputs=[audio_state, edited_words_state, editor_content_state, words_per, font_family, font_size, text_position, bg_color, size_dd, timing_offset],
             outputs=[exported_video, status_box]
         )
 
@@ -2431,16 +2445,24 @@ def create_app():
                         ending = w['ending']
                         color = w['ending_color']
 
-                        # Calculate IPA split based on original split
-                        # Simple approach: split IPA at same character count ratio
-                        stem_len = len(stem)
-                        total_len = len(word_text)
-                        ipa_len = len(ipa_clean)
+                        # Better approach: color only the last N characters corresponding to ending
+                        # Count backwards from IPA, skipping stress marks and syllable dots
+                        ending_len = len(ending)
 
-                        # Find split point in IPA (proportional to original)
-                        ipa_split = int((stem_len / total_len) * ipa_len) if total_len > 0 else 0
-                        ipa_stem = ipa_clean[:ipa_split]
-                        ipa_ending = ipa_clean[ipa_split:]
+                        # Work backwards through IPA to find the ending portion
+                        char_count = 0
+                        split_pos = len(ipa_clean)
+
+                        for i in range(len(ipa_clean) - 1, -1, -1):
+                            # Skip IPA markers (stress, syllable separators)
+                            if ipa_clean[i] not in ['ˈ', 'ˌ', '.', ' ']:
+                                char_count += 1
+                                if char_count >= ending_len:
+                                    split_pos = i
+                                    break
+
+                        ipa_stem = ipa_clean[:split_pos]
+                        ipa_ending = ipa_clean[split_pos:]
 
                         # Create HTML for IPA with split coloring
                         ipa_word['html'] = f'<span style="color: {DEFAULT_SAMPLE_TEXT_COLOR};">{ipa_stem}</span><span style="color: {color};">{ipa_ending}</span>'
