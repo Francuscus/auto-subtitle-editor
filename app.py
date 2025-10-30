@@ -349,7 +349,7 @@ def transcribe_to_ipa_internal(text, dialect='dominican'):
 PERSON_COLORS = {
     'yo': '#FF0000',           # 🔴 red
     'tu': '#0000FF',           # 🔵 blue
-    'el': '#FFFF00',           # 🟡 yellow
+    'el': '#FFD700',           # 🟡 gold (darker yellow)
     'nosotros': '#9C27B0',     # 🟣 purple
     'ellos': '#00FF00',        # 🟢 green
     'shared': '#FFA500'        # 🟠 orange (yo = él/ella/usted)
@@ -471,45 +471,44 @@ def identify_verb_ending_gated(word):
     """
     word_lower = word.lower()
 
-    # Haber: h + e/as/a/emos/an (color only after h)
+    # Haber: only color minimal person markers
     if word_lower in ['he', 'has', 'ha', 'hemos', 'han']:
-        rest = word_lower[1:]
-        if rest == 'e':
+        if word_lower == 'he':
             return ('h', 'e', 'yo', PERSON_COLORS['yo'])
-        elif rest == 'as':
-            return ('h', 'as', 'tu', PERSON_COLORS['tu'])
-        elif rest == 'a':
+        elif word_lower == 'has':
+            return ('ha', 's', 'tu', PERSON_COLORS['tu'])  # only "s"
+        elif word_lower == 'ha':
             return ('h', 'a', 'el', PERSON_COLORS['el'])
-        elif rest == 'emos':
-            return ('h', 'emos', 'nosotros', PERSON_COLORS['nosotros'])
-        elif rest == 'an':
-            return ('h', 'an', 'ellos', PERSON_COLORS['ellos'])
+        elif word_lower == 'hemos':
+            return ('he', 'mos', 'nosotros', PERSON_COLORS['nosotros'])  # only "mos"
+        elif word_lower == 'han':
+            return ('ha', 'n', 'ellos', PERSON_COLORS['ellos'])  # only "n"
 
-    # Estar: est + oy/ás/á/amos/án
+    # Estar: only color minimal person markers
     if word_lower in ['estoy', 'estás', 'está', 'estamos', 'están']:
         if word_lower == 'estoy':
             return ('est', 'oy', 'yo', PERSON_COLORS['yo'])
         elif word_lower == 'estás':
-            return ('est', 'ás', 'tu', PERSON_COLORS['tu'])
+            return ('está', 's', 'tu', PERSON_COLORS['tu'])  # only "s"
         elif word_lower == 'está':
-            return ('est', 'á', 'el', PERSON_COLORS['el'])
+            return ('est', 'á', 'el', PERSON_COLORS['el'])  # only "á"
         elif word_lower == 'estamos':
-            return ('est', 'amos', 'nosotros', PERSON_COLORS['nosotros'])
+            return ('esta', 'mos', 'nosotros', PERSON_COLORS['nosotros'])  # only "mos"
         elif word_lower == 'están':
-            return ('est', 'án', 'ellos', PERSON_COLORS['ellos'])
+            return ('está', 'n', 'ellos', PERSON_COLORS['ellos'])  # only "n"
 
-    # Ir: v + oy/as/a/amos/an
+    # Ir: only color minimal person markers
     if word_lower in ['voy', 'vas', 'va', 'vamos', 'van']:
         if word_lower == 'voy':
             return ('v', 'oy', 'yo', PERSON_COLORS['yo'])
         elif word_lower == 'vas':
-            return ('v', 'as', 'tu', PERSON_COLORS['tu'])
+            return ('va', 's', 'tu', PERSON_COLORS['tu'])  # only "s"
         elif word_lower == 'va':
-            return ('v', 'a', 'el', PERSON_COLORS['el'])
+            return ('v', 'a', 'el', PERSON_COLORS['el'])  # only "a"
         elif word_lower == 'vamos':
-            return ('v', 'amos', 'nosotros', PERSON_COLORS['nosotros'])
+            return ('va', 'mos', 'nosotros', PERSON_COLORS['nosotros'])  # only "mos"
         elif word_lower == 'van':
-            return ('v', 'an', 'ellos', PERSON_COLORS['ellos'])
+            return ('va', 'n', 'ellos', PERSON_COLORS['ellos'])  # only "n"
 
     # Imperfect -aba (shared yo/él)
     if word_lower.endswith('ábamos'):
@@ -547,27 +546,27 @@ def identify_verb_ending_gated(word):
     elif word_lower.endswith('ió'):
         return (word[:-2], word[-2:], 'el', PERSON_COLORS['el'])
 
-    # Present: -mos (most distinctive)
+    # Present: -mos (only color "mos", not full ending)
     if word_lower.endswith('amos'):
-        return (word[:-4], word[-4:], 'nosotros', PERSON_COLORS['nosotros'])
+        return (word[:-3], word[-3:], 'nosotros', PERSON_COLORS['nosotros'])  # only "mos"
     elif word_lower.endswith('emos'):
-        return (word[:-4], word[-4:], 'nosotros', PERSON_COLORS['nosotros'])
+        return (word[:-3], word[-3:], 'nosotros', PERSON_COLORS['nosotros'])  # only "mos"
     elif word_lower.endswith('imos'):
-        return (word[:-4], word[-4:], 'nosotros', PERSON_COLORS['nosotros'])
+        return (word[:-3], word[-3:], 'nosotros', PERSON_COLORS['nosotros'])  # only "mos"
 
-    # Present: -s (tú) - check longer endings first
+    # Present: -s (tú) - only color "s"
     if word_lower.endswith('as') and not word_lower.endswith('abas'):
-        return (word[:-2], word[-2:], 'tu', PERSON_COLORS['tu'])
+        return (word[:-1], word[-1:], 'tu', PERSON_COLORS['tu'])  # only "s"
     elif word_lower.endswith('es') and not word_lower.endswith(('eres', 'iones')):
-        return (word[:-2], word[-2:], 'tu', PERSON_COLORS['tu'])
+        return (word[:-1], word[-1:], 'tu', PERSON_COLORS['tu'])  # only "s"
     elif word_lower.endswith('s') and len(word_lower) >= 4:
         return (word[:-1], word[-1:], 'tu', PERSON_COLORS['tu'])
 
-    # Present: -n (ellos)
+    # Present: -n (ellos) - only color "n"
     if word_lower.endswith('an') and not word_lower.endswith(('aban', 'rán')):
-        return (word[:-2], word[-2:], 'ellos', PERSON_COLORS['ellos'])
+        return (word[:-1], word[-1:], 'ellos', PERSON_COLORS['ellos'])  # only "n"
     elif word_lower.endswith('en') and not word_lower.endswith('ieren'):
-        return (word[:-2], word[-2:], 'ellos', PERSON_COLORS['ellos'])
+        return (word[:-1], word[-1:], 'ellos', PERSON_COLORS['ellos'])  # only "n"
     elif word_lower.endswith('n') and len(word_lower) >= 4:
         return (word[:-1], word[-1:], 'ellos', PERSON_COLORS['ellos'])
 
@@ -617,8 +616,9 @@ def apply_spanish_verb_coloring(words):
             colored_word['ending'] = ending
             colored_word['ending_color'] = color
             colored_word['person'] = person
-            # For now, color the whole word (character-level coloring comes later)
-            colored_word['color'] = color
+            # Create HTML with stem (default color) + ending (person color)
+            colored_word['html'] = f'<span style="color: {DEFAULT_SAMPLE_TEXT_COLOR};">{stem}</span><span style="color: {color};">{ending}</span>'
+            colored_word['color'] = color  # Keep for backward compatibility
             colored_words.append(colored_word)
         else:
             # Passed gate but no ending match - keep original
@@ -1517,8 +1517,14 @@ function updatePreview() {
     if (preview) {
         if (currentWords.length > 0) {
             const text = currentWords.map(w => {
-                const color = w.color || '#FFFFFF';
-                return '<span style="color: ' + color + '; font-size: 48px; margin: 0 8px;">' + w.text + '</span>';
+                if (w.html) {
+                    // Use character-level coloring (stem + ending)
+                    return '<span style="font-size: 48px; margin: 0 8px;">' + w.html + '</span>';
+                } else {
+                    // Use word-level coloring
+                    const color = w.color || '#FFFFFF';
+                    return '<span style="color: ' + color + '; font-size: 48px; margin: 0 8px;">' + w.text + '</span>';
+                }
             }).join(' ');
             preview.innerHTML = '<div>' + text + '</div>';
         } else {
@@ -2090,8 +2096,13 @@ def create_app():
             # Generate a sample preview showing first few words with their colors
             sample_html = '<div id="preview-canvas"><div style="line-height: 1.5;">'
             for w in words[:10]:  # Show first 10 words
-                color = w.get("color", DEFAULT_SAMPLE_TEXT_COLOR)
-                sample_html += f'<span style="color: {color}; font-size: 36px; margin: 0 8px;">{w["text"]}</span>'
+                if 'html' in w and w['html']:
+                    # Use character-level coloring (stem + ending)
+                    sample_html += f'<span style="font-size: 36px; margin: 0 8px;">{w["html"]}</span>'
+                else:
+                    # Use word-level coloring
+                    color = w.get("color", DEFAULT_SAMPLE_TEXT_COLOR)
+                    sample_html += f'<span style="color: {color}; font-size: 36px; margin: 0 8px;">{w["text"]}</span>'
             if len(words) > 10:
                 sample_html += '<span style="color: #888; font-size: 24px;">...</span>'
             sample_html += '</div></div>'
@@ -2135,8 +2146,13 @@ def create_app():
                 # Recreate editor HTML with colored verbs
                 editor_content = '<div id="lyric-editor" contenteditable="true">\n'
                 for w in colored_words:
-                    color = w.get('color', DEFAULT_SAMPLE_TEXT_COLOR)
-                    editor_content += f'<span class="word" data-start="{w["start"]:.3f}" data-end="{w["end"]:.3f}" style="color: {color};">{w["text"]}</span> '
+                    if 'html' in w and w['html']:
+                        # Use character-level coloring for verbs (stem + ending)
+                        editor_content += f'<span class="word" data-start="{w["start"]:.3f}" data-end="{w["end"]:.3f}">{w["html"]}</span> '
+                    else:
+                        # Use word-level coloring for non-verbs
+                        color = w.get('color', DEFAULT_SAMPLE_TEXT_COLOR)
+                        editor_content += f'<span class="word" data-start="{w["start"]:.3f}" data-end="{w["end"]:.3f}" style="color: {color};">{w["text"]}</span> '
                 editor_content += '\n</div>'
 
                 status_msg = f"✅ Colored {verb_count} verb(s) by person marker!"
@@ -2391,43 +2407,86 @@ def create_app():
         # Acentos IPA Transcription Handlers (Integrated)
 
         def transcribe_to_ipa(edited_words, dialect_name, dialect_id):
-            """Transcribe lyrics to IPA using integrated acentos logic"""
+            """Transcribe lyrics to IPA using integrated acentos logic, preserving verb colors"""
             if not edited_words:
                 return edited_words, f"❌ No lyrics to transcribe. Transcribe audio first."
 
             try:
-                # Extract all text
-                text = " ".join([w["text"] for w in edited_words])
+                ipa_words = []
+                for w in edited_words:
+                    word_text = w["text"]
 
-                # Call integrated IPA transcription function
-                ipa_text = transcribe_to_ipa_internal(text, dialect_id)
+                    # Transcribe individual word to IPA
+                    ipa_result = transcribe_to_ipa_internal(word_text, dialect_id)
+                    # Remove brackets: "[ˈba.mos]" -> "ˈba.mos"
+                    ipa_clean = ipa_result.strip('[]').strip()
 
-                return edited_words, f"✅ Transcribed to {dialect_name} IPA: {ipa_text}"
+                    # Create new word object with IPA text
+                    ipa_word = w.copy()
+                    ipa_word['ipa_text'] = ipa_clean
+
+                    # If word has split coloring (verb), apply it to IPA text too
+                    if 'html' in w and w['html'] and 'stem' in w and 'ending' in w:
+                        stem = w['stem']
+                        ending = w['ending']
+                        color = w['ending_color']
+
+                        # Calculate IPA split based on original split
+                        # Simple approach: split IPA at same character count ratio
+                        stem_len = len(stem)
+                        total_len = len(word_text)
+                        ipa_len = len(ipa_clean)
+
+                        # Find split point in IPA (proportional to original)
+                        ipa_split = int((stem_len / total_len) * ipa_len) if total_len > 0 else 0
+                        ipa_stem = ipa_clean[:ipa_split]
+                        ipa_ending = ipa_clean[ipa_split:]
+
+                        # Create HTML for IPA with split coloring
+                        ipa_word['html'] = f'<span style="color: {DEFAULT_SAMPLE_TEXT_COLOR};">{ipa_stem}</span><span style="color: {color};">{ipa_ending}</span>'
+                        ipa_word['text'] = ipa_clean
+                    else:
+                        # Non-verb word: just update text to IPA
+                        ipa_word['text'] = ipa_clean
+
+                    ipa_words.append(ipa_word)
+
+                # Create editor HTML with IPA
+                editor_content = '<div id="lyric-editor" contenteditable="true">\n'
+                for w in ipa_words:
+                    if 'html' in w and w['html']:
+                        editor_content += f'<span class="word" data-start="{w["start"]:.3f}" data-end="{w["end"]:.3f}">{w["html"]}</span> '
+                    else:
+                        color = w.get('color', DEFAULT_SAMPLE_TEXT_COLOR)
+                        editor_content += f'<span class="word" data-start="{w["start"]:.3f}" data-end="{w["end"]:.3f}" style="color: {color};">{w["text"]}</span> '
+                editor_content += '\n</div>'
+
+                return ipa_words, editor_content, f"✅ Transcribed to {dialect_name} IPA!"
             except Exception as e:
-                return edited_words, f"❌ Error: {str(e)}"
+                return edited_words, "", f"❌ Error: {str(e)}"
 
         transcribe_dominican_btn.click(
             fn=lambda words: transcribe_to_ipa(words, "Dominican", "dominican"),
             inputs=[edited_words_state],
-            outputs=[edited_words_state, acentos_status]
+            outputs=[edited_words_state, editor_html, acentos_status]
         )
 
         transcribe_mexican_btn.click(
             fn=lambda words: transcribe_to_ipa(words, "Mexican", "mexican"),
             inputs=[edited_words_state],
-            outputs=[edited_words_state, acentos_status]
+            outputs=[edited_words_state, editor_html, acentos_status]
         )
 
         transcribe_rioplatense_btn.click(
             fn=lambda words: transcribe_to_ipa(words, "Rioplatense", "rioplatense"),
             inputs=[edited_words_state],
-            outputs=[edited_words_state, acentos_status]
+            outputs=[edited_words_state, editor_html, acentos_status]
         )
 
         transcribe_cadiz_btn.click(
             fn=lambda words: transcribe_to_ipa(words, "Cádiz", "cadiz"),
             inputs=[edited_words_state],
-            outputs=[edited_words_state, acentos_status]
+            outputs=[edited_words_state, editor_html, acentos_status]
         )
 
         return demo
