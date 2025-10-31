@@ -18,12 +18,15 @@ import whisperx
 # Spanish NLP for verb detection
 try:
     import spacy
+    print("Loading spaCy Spanish model...")
     nlp_es = spacy.load("es_core_news_sm")
     SPACY_AVAILABLE = True
-except:
+    print("✅ spaCy Spanish model loaded successfully! AI verb detection enabled.")
+except Exception as e:
     SPACY_AVAILABLE = False
     nlp_es = None
-    print("⚠️  spaCy Spanish model not available. Using rule-based verb detection.")
+    print(f"⚠️  spaCy Spanish model not available: {e}")
+    print("   Using rule-based verb detection as fallback.")
 
 # -------------------------- Config --------------------------
 
@@ -1996,6 +1999,11 @@ def create_app():
                 gr.Markdown("### 🎨 Quick Actions")
                 save_colors_btn = gr.Button("💾 Save Colors", variant="primary")
                 save_status = gr.Textbox(label="Save Status", value="", interactive=False, lines=1, visible=False)
+
+                # Show spaCy status
+                spacy_status_msg = "✅ AI Verb Detection: spaCy loaded" if SPACY_AVAILABLE else "⚠️ AI Verb Detection: Using rule-based fallback (spaCy unavailable)"
+                spacy_status_display = gr.Markdown(f"**{spacy_status_msg}**")
+
                 auto_color_verbs_btn = gr.Button("🔤 Auto-Color Spanish Verbs", variant="secondary")
                 verb_status = gr.Textbox(label="Verb Coloring Status", value="", interactive=False, lines=1, visible=False)
                 update_preview_btn = gr.Button("🔄 Update Preview")
@@ -2190,7 +2198,8 @@ def create_app():
                         editor_content += f'<span class="word" data-start="{w["start"]:.3f}" data-end="{w["end"]:.3f}" style="color: {color};">{w["text"]}</span> '
                 editor_content += '\n</div>'
 
-                status_msg = f"✅ Colored {verb_count} verb(s) by person marker!"
+                detection_method = "AI (spaCy)" if SPACY_AVAILABLE else "Rule-based"
+                status_msg = f"✅ Colored {verb_count} verb(s) using {detection_method} detection"
                 return colored_words, editor_content, gr.update(value=status_msg, visible=True)
 
             except Exception as e:
