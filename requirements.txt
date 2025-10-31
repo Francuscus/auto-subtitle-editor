@@ -8,7 +8,11 @@ av==12.3.0
 ffmpeg-python>=0.2.0
 numpy>=1.26,<3
 
-# Optional (no longer needed - acentos integrated, verb detection uses rules)
+# Spanish NLP for verb detection
+spacy>=3.7.0
+https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.7.0/es_core_news_sm-3.7.0-py3-none-any.whl
+
+# Optional (acentos integrated)
 flask>=3.0.0
 flask-cors>=4.0.0
 requests>=2.31.0
