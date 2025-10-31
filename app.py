@@ -1,6 +1,6 @@
 # Language Learning Subtitle Editor
-# Version 4.3 — IPA Letter-Level Coloring, Timing Offset Fixed
-# Banner Color: #F57C00 (Orange)
+# Version 4.5 — AI-Powered Verb Detection with spaCy
+# Banner Color: #00BCD4 (Cyan)
 
 import os
 import re
@@ -15,10 +15,20 @@ import gradio as gr
 import torch
 import whisperx
 
+# Spanish NLP for verb detection
+try:
+    import spacy
+    nlp_es = spacy.load("es_core_news_sm")
+    SPACY_AVAILABLE = True
+except:
+    SPACY_AVAILABLE = False
+    nlp_es = None
+    print("⚠️  spaCy Spanish model not available. Using rule-based verb detection.")
+
 # -------------------------- Config --------------------------
 
-VERSION = "4.3"
-BANNER_COLOR = "#F57C00"  # Orange banner (v4.3 - IPA letter-level coloring, timing offset)
+VERSION = "4.5"
+BANNER_COLOR = "#00BCD4"  # Cyan banner (v4.5 - AI-powered verb detection with spaCy)
 DEFAULT_SAMPLE_TEXT_COLOR = "#1e88e5"  # Blue so it isn't white-on-white
 
 LANG_MAP = {
@@ -393,26 +403,44 @@ def passes_verb_gate(word, prev_word=None, next_word=None, is_first=False):
     """
     Phase 1: Verb Detection Gate
     Returns True only if word passes as a potential verb (not a noun/adjective/etc.)
+    Uses spaCy POS tagging when available, falls back to rule-based system
     """
     word_lower = word.lower()
     prev_lower = prev_word.lower() if prev_word else None
 
-    # DISQUALIFIERS (fail immediately)
-    # 1. Preceded by article/determiner → likely noun
-    if prev_lower and (prev_lower in ARTICLES or prev_lower in DETERMINERS):
-        return False
-
-    # 2. Ends with -mente → adverb
+    # Quick filters (apply before spaCy for efficiency)
+    # 1. Ends with -mente → adverb
     if word_lower.endswith('mente'):
         return False
 
-    # 3. Infinitives -ar/-er/-ir (don't color them)
+    # 2. Infinitives -ar/-er/-ir (don't color them)
     if word_lower.endswith(('ar', 'er', 'ir')) and len(word_lower) > 3:
         return False
 
-    # AUXILIARIES (always pass)
+    # 3. AUXILIARIES (always pass)
     if word_lower in AUXILIARIES:
         return True
+
+    # USE SPACY IF AVAILABLE
+    if SPACY_AVAILABLE and nlp_es:
+        try:
+            # Analyze word with spaCy
+            doc = nlp_es(word)
+            if len(doc) > 0:
+                token = doc[0]
+                # Check if POS tag is VERB or AUX
+                # Spanish POS tags: VERB (main verbs), AUX (auxiliary verbs)
+                if token.pos_ in ['VERB', 'AUX']:
+                    return True
+                else:
+                    return False
+        except:
+            pass  # Fall through to rule-based system if spaCy fails
+
+    # FALLBACK: RULE-BASED SYSTEM (original logic)
+    # Preceded by article/determiner → likely noun
+    if prev_lower and (prev_lower in ARTICLES or prev_lower in DETERMINERS):
+        return False
 
     # CONJUGATED FORM PATTERNS
     # Must match a known conjugation pattern
@@ -438,30 +466,21 @@ def passes_verb_gate(word, prev_word=None, next_word=None, is_first=False):
     elif word_lower.endswith(('an', 'en')) and len(word_lower) >= 4:
         has_verb_ending = True
     elif word_lower.endswith('o') and len(word_lower) >= 4:
-        # "hablo", "como" YES, but "yo", "no", "como" (noun) need context
         has_verb_ending = True
     elif word_lower.endswith(('a', 'e')) and len(word_lower) >= 4:
-        # "habla", "come" YES, but "casa", "clase" need checking
-        # Only pass if we have positive context
-        has_verb_ending = False  # Will check context below
+        has_verb_ending = True
 
     if not has_verb_ending:
         return False
 
     # SYNTACTIC CONTEXT (boost confidence)
-    # Following subject pronoun → definitely verb
     if prev_lower and prev_lower in SUBJECT_PRONOUNS:
         return True
-
-    # Following negation → definitely verb
     if prev_lower and prev_lower in NEGATIONS:
         return True
-
-    # First word in sentence with strong verb ending → likely verb
     if is_first and word_lower.endswith(('é', 'ó', 'aba', 'ía', 'amos', 'emos')):
         return True
 
-    # If we got here, it matched a verb ending pattern
     return True
 
 def identify_verb_ending_gated(word):
@@ -1917,6 +1936,16 @@ def create_app():
                         <button class="toolbar-btn" onclick="applyColor('#000000')" title="Black">
                             <span style="color: #000000;">●</span> Black
                         </button>
+                        <button class="toolbar-btn" onclick="applyColor('#1e88e5')" title="Default Blue" style="background: #1e88e5; color: white;">
+                            <span style="color: #FFF;">●</span> Default
+                        </button>
+                        <div style="width: 1px; height: 30px; background: #ddd; margin: 0 8px;"></div>
+                        <label style="display: inline-flex; align-items: center; margin: 0 4px;">
+                            <span style="margin-right: 4px; font-weight: bold;">Custom:</span>
+                            <input type="color" id="customColorPicker" value="#1e88e5"
+                                   style="width: 40px; height: 30px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer;"
+                                   onchange="applyColor(this.value)" title="Pick any color">
+                        </label>
                         <div style="width: 1px; height: 30px; background: #ddd; margin: 0 8px;"></div>
                         <button class="toolbar-btn" onclick="applyFontSize(24)" title="Small">Small</button>
                         <button class="toolbar-btn" onclick="applyFontSize(36)" title="Medium">Medium</button>
