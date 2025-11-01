@@ -1,6 +1,6 @@
 # Language Learning Subtitle Editor
-# Version 4.3 — IPA Letter-Level Coloring, Timing Offset Fixed
-# Banner Color: #F57C00 (Orange)
+# Version 4.6 — Transformers Whisper + Fixed Verb Colorization
+# Banner Color: #9C27B0 (Purple)
 
 import os
 import re
@@ -13,12 +13,11 @@ import shutil
 
 import gradio as gr
 import torch
-import whisperx
 
 # -------------------------- Config --------------------------
 
-VERSION = "4.3"
-BANNER_COLOR = "#F57C00"  # Orange banner (v4.3 - IPA letter-level coloring, timing offset)
+VERSION = "4.6"
+BANNER_COLOR = "#9C27B0"  # Purple banner (v4.6 - transformers whisper, fixed verb colorization)
 DEFAULT_SAMPLE_TEXT_COLOR = "#1e88e5"  # Blue so it isn't white-on-white
 
 LANG_MAP = {
@@ -628,60 +627,102 @@ def apply_spanish_verb_coloring(words):
 
 # -------------------------- ASR Model --------------------------
 
-_asr_model = None
+_whisper_pipe = None
 
 def get_asr_model():
-    global _asr_model
-    if _asr_model is not None:
-        return _asr_model
+    """
+    Load Whisper model using HuggingFace Transformers pipeline.
+    Uses whisper-medium for better accuracy.
+    Compatible with HuggingFace Spaces (no ctranslate2 dependency).
+    """
+    global _whisper_pipe
+    if _whisper_pipe is not None:
+        return _whisper_pipe
 
-    use_cuda = torch.cuda.is_available()
-    device = "cuda" if use_cuda else "cpu"
-    compute = "float16" if use_cuda else "int8"  # CPU int8; safe + fast
+    from transformers import pipeline
 
-    print(f"[v{VERSION}] Loading WhisperX on {device} with compute_type={compute}")
-    try:
-        _asr_model = whisperx.load_model("small", device=device, compute_type=compute)
-    except ValueError as e:
-        if "compute type" in str(e).lower():
-            fallback = "int16" if device == "cpu" else "float32"
-            print(f"[v{VERSION}] Falling back to compute_type={fallback}")
-            _asr_model = whisperx.load_model("small", device=device, compute_type=fallback)
-        else:
-            raise
-    return _asr_model
+    device = 0 if torch.cuda.is_available() else -1
+    print(f"[v{VERSION}] Loading Whisper model (transformers pipeline)...")
+
+    # Use pipeline with stride to avoid logprobs bugs
+    _whisper_pipe = pipeline(
+        "automatic-speech-recognition",
+        model="openai/whisper-medium",
+        device=device,
+        chunk_length_s=30,
+        stride_length_s=5,  # Helps avoid logprobs bug
+        return_timestamps=True
+    )
+
+    print("✅ Whisper model loaded successfully!")
+    return _whisper_pipe
 
 # -------------------------- Transcription --------------------------
 
 def transcribe_with_words(audio_path: str, language_code: Optional[str]) -> List[dict]:
-    model = get_asr_model()
+    """
+    Transcribe audio to word-level timestamps.
+
+    KEY FIX: Transformers pipeline returns "chunks" (phrases), not individual words.
+    We must split each chunk into words and distribute timestamps.
+    This ensures verb colorization receives proper word-level data.
+    """
+    pipe = get_asr_model()
     print("[Transcribe] Starting transcription...")
-    result = model.transcribe(audio_path, language=language_code)
-    segments = result.get("segments", [])
+
+    import librosa
+    audio, sr = librosa.load(audio_path, sr=16000)
+
+    # Transcribe - do NOT use generate_kwargs (causes logprobs bug)
+    result = pipe(audio)
 
     words: List[dict] = []
-    for seg in segments:
-        s_start = float(seg.get("start", 0.0))
-        s_end = float(seg.get("end", max(s_start + 0.2, s_start)))
-        if "words" in seg and seg["words"]:
-            for w in seg["words"]:
-                w_text = (w.get("word") or w.get("text") or "").strip()
-                if not w_text:
-                    continue
-                w_start = float(w.get("start", s_start))
-                w_end = float(w.get("end", s_end))
-                words.append({"start": w_start, "end": w_end, "text": w_text})
-        else:
-            text = (seg.get("text") or "").strip()
-            toks = [t for t in text.split() if t]
-            if not toks:
+
+    if "chunks" in result:
+        # Extract individual words from chunks
+        for chunk in result["chunks"]:
+            chunk_text = chunk.get("text", "").strip()
+            if not chunk_text:
                 continue
-            dur = max(s_end - s_start, 0.2)
-            step = dur / len(toks)
-            for i, tok in enumerate(toks):
-                w_start = s_start + i * step
-                w_end = min(s_start + (i + 1) * step, s_end)
-                words.append({"start": round(w_start, 3), "end": round(w_end, 3), "text": tok})
+
+            # Get chunk timestamps
+            timestamp = chunk.get("timestamp", [0.0, 0.0])
+            chunk_start = float(timestamp[0]) if len(timestamp) > 0 and timestamp[0] is not None else 0.0
+            chunk_end = float(timestamp[1]) if len(timestamp) > 1 and timestamp[1] is not None else chunk_start + 0.2
+
+            # CRITICAL FIX: Split chunk into individual words
+            word_list = chunk_text.split()
+            if not word_list:
+                continue
+
+            # Distribute chunk duration evenly across words
+            chunk_duration = chunk_end - chunk_start
+            time_per_word = chunk_duration / len(word_list)
+
+            for i, word_text in enumerate(word_list):
+                w_start = chunk_start + (i * time_per_word)
+                w_end = chunk_start + ((i + 1) * time_per_word)
+                words.append({
+                    "start": round(w_start, 3),
+                    "end": round(w_end, 3),
+                    "text": word_text.strip()
+                })
+    else:
+        # Fallback: no chunks, use full text
+        full_text = result.get("text", "")
+        word_list = full_text.split()
+        duration = len(audio) / sr
+        time_per_word = duration / len(word_list) if word_list else 1.0
+
+        for i, word_text in enumerate(word_list):
+            w_start = i * time_per_word
+            w_end = (i + 1) * time_per_word
+            words.append({
+                "start": round(w_start, 3),
+                "end": round(w_end, 3),
+                "text": word_text.strip()
+            })
+
     print(f"[Transcribe] Got {len(words)} words.")
     return words
 
