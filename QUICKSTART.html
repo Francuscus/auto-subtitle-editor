@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quick Start - Auto Subtitle Editor v4.6</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, Arial, sans-serif;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 40px 20px;
+      line-height: 1.6;
+      background: #f5f5f5;
+    }
+    .header {
+      background: linear-gradient(135deg, #9C27B0 0%, #7B1FA2 100%);
+      color: white;
+      padding: 30px;
+      border-radius: 12px;
+      margin-bottom: 30px;
+    }
+    .header h1 {
+      margin: 0 0 10px 0;
+      font-size: 2.5em;
+    }
+    .version {
+      opacity: 0.9;
+      font-size: 0.9em;
+    }
+    .section {
+      background: white;
+      padding: 25px;
+      margin-bottom: 20px;
+      border-radius: 12px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .section h2 {
+      color: #9C27B0;
+      margin-top: 0;
+      border-bottom: 2px solid #9C27B0;
+      padding-bottom: 10px;
+    }
+    code {
+      background: #f5f5f5;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'Courier New', monospace;
+      font-size: 0.9em;
+    }
+    pre {
+      background: #2d2d2d;
+      color: #f8f8f8;
+      padding: 15px;
+      border-radius: 8px;
+      overflow-x: auto;
+    }
+    pre code {
+      background: transparent;
+      color: #f8f8f8;
+      padding: 0;
+    }
+    .demo {
+      border: 2px solid #9C27B0;
+      padding: 20px;
+      border-radius: 8px;
+      background: #fafafa;
+    }
+    .word {
+      display: inline-block;
+      margin: 3px 2px;
+      padding: 2px 4px;
+    }
+    .verb-ending {
+      background: yellow;
+      font-weight: bold;
+    }
+    ul li {
+      margin: 8px 0;
+    }
+    .note {
+      background: #fff3cd;
+      border-left: 4px solid #ffc107;
+      padding: 12px;
+      margin: 15px 0;
+      border-radius: 4px;
+    }
+    .success {
+      background: #d4edda;
+      border-left: 4px solid #28a745;
+      padding: 12px;
+      margin: 15px 0;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🎵 Auto Subtitle Editor</h1>
+    <div class="version">Version 4.6 — Transformers Whisper + AI Verb Detection</div>
+  </div>
+
+  <div class="section">
+    <h2>🚀 Running Locally (on your computer)</h2>
+
+    <p>To run this app on your local machine:</p>
+
+    <h3>Step 1: Clone the repository</h3>
+    <pre><code>git clone https://github.com/Francuscus/auto-subtitle-editor.git
+cd auto-subtitle-editor</code></pre>
+
+    <h3>Step 2: Install Python dependencies</h3>
+    <pre><code>pip install -r requirements.txt</code></pre>
+
+    <div class="note">
+      <strong>Note:</strong> This will download approximately 1.5 GB of models (Whisper + spaCy).
+      The first install may take 5-10 minutes depending on your internet connection.
+    </div>
+
+    <h3>Step 3: Run the app</h3>
+    <pre><code>python app.py</code></pre>
+
+    <div class="success">
+      <strong>✅ Success!</strong> The app will open in your browser at <code>http://localhost:7860</code>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>☁️ Running on Hugging Face Spaces</h2>
+
+    <p>This version (v4.6) is now compatible with Hugging Face Spaces!</p>
+
+    <ol>
+      <li>Go to your Hugging Face Space settings</li>
+      <li>Connect to this GitHub repository (if not already connected)</li>
+      <li>Click "Sync" or "Factory Rebuild" to update</li>
+      <li>Wait for build to complete (~5-10 minutes)</li>
+    </ol>
+
+    <div class="note">
+      <strong>What's fixed:</strong> Switched from WhisperX to transformers pipeline, which is compatible with HF Spaces (no ctranslate2 dependency issues).
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>🎯 What's New in v4.6</h2>
+
+    <ul>
+      <li><strong>Fixed verb colorization:</strong> Now properly detects and colors all Spanish verbs using spaCy AI</li>
+      <li><strong>Better transcription:</strong> Uses Whisper-medium model via transformers (no ctranslate2 errors)</li>
+      <li><strong>Word-level accuracy:</strong> Properly extracts individual words from audio chunks</li>
+      <li><strong>Works everywhere:</strong> Compatible with both local machines and Hugging Face Spaces</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>✨ Demo: Spanish Verb Colorization</h2>
+
+    <p>The app automatically detects Spanish verbs and colors their endings:</p>
+
+    <div class="demo">
+      <div style="font-size: 18px; line-height: 2;">
+        <span class="word">Yo</span>
+        <span class="word">cant<span class="verb-ending">o</span></span>
+        <span class="word">una</span>
+        <span class="word">canción</span>
+        <span class="word">y</span>
+        <span class="word">bailam<span class="verb-ending">os</span></span>
+        <span class="word">juntos</span>
+        <span class="word">en</span>
+        <span class="word">la</span>
+        <span class="word">fiesta</span>
+        <span class="word">cuando</span>
+        <span class="word">llegue<span class="verb-ending">n</span></span>
+        <span class="word">los</span>
+        <span class="word">amigos</span>
+      </div>
+    </div>
+
+    <p style="margin-top: 15px;">
+      <strong>How it works:</strong>
+    </p>
+    <ul>
+      <li>Uses spaCy AI to identify verbs (not nouns)</li>
+      <li>Only colors the minimal verb endings (o, mos, n, etc.)</li>
+      <li>Helps Spanish learners see conjugation patterns</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>🔧 Features</h2>
+
+    <ul>
+      <li><strong>Audio Transcription:</strong> Upload Spanish songs/audio, get word-level transcripts</li>
+      <li><strong>AI Verb Detection:</strong> Automatic Spanish verb identification using spaCy</li>
+      <li><strong>IPA Transcription:</strong> Optional phonetic transcription for pronunciation help</li>
+      <li><strong>Custom Styling:</strong> Color picker, font selection, text formatting</li>
+      <li><strong>Timing Control:</strong> Adjust subtitle timing with offset slider</li>
+      <li><strong>Export Options:</strong> .srt, .ass, .vtt subtitle formats + colorized video</li>
+      <li><strong>Built-in Editor:</strong> Edit transcriptions directly in the interface</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>📝 Workflow</h2>
+
+    <ol>
+      <li><strong>Upload audio</strong> (Spanish song, podcast, etc.)</li>
+      <li><strong>Click "Transcribe Audio"</strong> — wait 2-10 minutes depending on audio length</li>
+      <li><strong>Click "Auto-Color Spanish Verbs"</strong> — instant AI-powered verb detection</li>
+      <li><strong>Edit & Style</strong> — customize colors, fonts, highlights as needed</li>
+      <li><strong>Export</strong> — download as subtitle file (.srt) or colorized video</li>
+    </ol>
+  </div>
+
+  <div class="section">
+    <h2>🐛 Troubleshooting</h2>
+
+    <h3>Transcription taking too long?</h3>
+    <p>Whisper-medium on CPU takes ~2-3x the audio length. A 4-minute song takes 8-10 minutes.
+    This is normal! The model is large but accurate.</p>
+
+    <h3>Verb colorization not working?</h3>
+    <p>Make sure you clicked "Transcribe Audio" first and got words. Then click "Auto-Color Spanish Verbs".
+    Status should show "✅ Colored X verb(s) using AI (spaCy) detection".</p>
+
+    <h3>Dependencies fail to install?</h3>
+    <p>Make sure you have Python 3.9-3.11. If numpy errors occur, try:</p>
+    <pre><code>pip install numpy==1.26.4 --force-reinstall</code></pre>
+  </div>
+
+  <footer style="text-align: center; margin-top: 40px; padding: 20px; color: #666;">
+    <p>Version 4.6 — Purple Banner — November 2025</p>
+    <p>For issues or questions, visit the <a href="https://github.com/Francuscus/auto-subtitle-editor" style="color: #9C27B0;">GitHub repository</a></p>
+  </footer>
+</body>
+</html>
