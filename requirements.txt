@@ -6,16 +6,17 @@ gradio==4.44.0
 torch==2.8.0
 torchaudio==2.8.0
 
-# Audio processing (install after numpy/torch)
-whisperx==3.7.4
-faster-whisper==1.2.0
-ctranslate2==4.6.0
-av==12.3.0
-ffmpeg-python>=0.2.0
+# Audio transcription - use transformers Whisper (no ctranslate2!)
+transformers>=4.35.0
+accelerate>=0.20.0
+librosa>=0.10.0
 
 # Spanish NLP for verb detection (install after core packages)
 spacy>=3.7.0
 https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.7.0/es_core_news_sm-3.7.0-py3-none-any.whl
+
+# Video export
+ffmpeg-python>=0.2.0
 
 # Optional (acentos integrated)
 flask>=3.0.0
