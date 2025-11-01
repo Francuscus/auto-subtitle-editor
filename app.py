@@ -1,6 +1,6 @@
 # Language Learning Subtitle Editor
-# Version 4.6 — Transformers Whisper + Fixed Verb Colorization
-# Banner Color: #9C27B0 (Purple)
+# Version 5.00 — Transformers Whisper + Fixed Verb Colorization
+# Banner Color: #3F51B5 (Indigo)
 
 import os
 import re
@@ -29,8 +29,8 @@ except Exception as e:
 
 # -------------------------- Config --------------------------
 
-VERSION = "4.6"
-BANNER_COLOR = "#9C27B0"  # Purple banner (v4.6 - transformers whisper, fixed verb colorization)
+VERSION = "5.00"
+BANNER_COLOR = "#3F51B5"  # Indigo banner (v5.00 - transformers whisper, fixed verb colorization)
 DEFAULT_SAMPLE_TEXT_COLOR = "#1e88e5"  # Blue so it isn't white-on-white
 
 LANG_MAP = {
