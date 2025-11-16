@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Big Five Personality Assessment for Students</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Big Five Personality Assessment</h1>
+            <p class="subtitle">Discover Your OCEAN Personality Profile</p>
+        </header>
+
+        <!-- Welcome Screen -->
+        <div id="welcome-screen" class="screen active">
+            <div class="card">
+                <h2>Welcome, Student!</h2>
+                <p>This assessment will help you understand your personality across five key dimensions:</p>
+                <ul class="trait-list">
+                    <li><strong>O</strong>penness to Experience - Creativity & curiosity</li>
+                    <li><strong>C</strong>onscientiousness - Organization & dependability</li>
+                    <li><strong>E</strong>xtraversion - Sociability & energy</li>
+                    <li><strong>A</strong>greeableness - Cooperation & trust</li>
+                    <li><strong>N</strong>euroticism - Emotional sensitivity</li>
+                </ul>
+                <div class="info-box">
+                    <h3>About This Assessment</h3>
+                    <p>You'll answer 50 questions (10 per trait). There are no right or wrong answers - just be honest about how you typically feel and behave.</p>
+                    <p><strong>Time needed:</strong> 10-15 minutes</p>
+                </div>
+                <button id="start-btn" class="btn primary">Start Assessment</button>
+            </div>
+        </div>
+
+        <!-- Student Info Screen -->
+        <div id="info-screen" class="screen">
+            <div class="card">
+                <h2>Your Information (Optional)</h2>
+                <form id="student-info-form">
+                    <div class="form-group">
+                        <label for="student-name">Name or Nickname:</label>
+                        <input type="text" id="student-name" placeholder="Enter your name (optional)">
+                    </div>
+                    <div class="form-group">
+                        <label for="student-age">Age:</label>
+                        <input type="number" id="student-age" min="10" max="99" placeholder="Your age">
+                    </div>
+                    <div class="form-group">
+                        <label for="student-grade">Grade/Year:</label>
+                        <input type="text" id="student-grade" placeholder="e.g., 10th grade, Year 12">
+                    </div>
+                    <button type="submit" class="btn primary">Continue to Questions</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Quiz Screen -->
+        <div id="quiz-screen" class="screen">
+            <div class="progress-container">
+                <div class="progress-bar">
+                    <div id="progress-fill" class="progress-fill"></div>
+                </div>
+                <span id="progress-text">Question 1 of 50</span>
+            </div>
+
+            <div class="card question-card">
+                <div id="trait-indicator" class="trait-indicator"></div>
+                <h3 id="question-text"></h3>
+                <div class="likert-scale">
+                    <div class="scale-labels">
+                        <span>Strongly Disagree</span>
+                        <span>Neutral</span>
+                        <span>Strongly Agree</span>
+                    </div>
+                    <div class="scale-options" id="scale-options">
+                        <button class="scale-btn" data-value="1">1</button>
+                        <button class="scale-btn" data-value="2">2</button>
+                        <button class="scale-btn" data-value="3">3</button>
+                        <button class="scale-btn" data-value="4">4</button>
+                        <button class="scale-btn" data-value="5">5</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="navigation">
+                <button id="prev-btn" class="btn secondary" disabled>Previous</button>
+                <button id="next-btn" class="btn primary" disabled>Next</button>
+            </div>
+        </div>
+
+        <!-- Results Screen -->
+        <div id="results-screen" class="screen">
+            <div class="card">
+                <h2>Your Personality Profile</h2>
+                <p id="student-greeting"></p>
+
+                <div class="chart-container">
+                    <canvas id="personality-chart"></canvas>
+                </div>
+
+                <div id="trait-results" class="trait-results">
+                    <!-- Trait results will be inserted here -->
+                </div>
+
+                <div class="actions">
+                    <button id="download-btn" class="btn secondary">Download Results (PDF)</button>
+                    <button id="retake-btn" class="btn primary">Take Again</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <p>Big Five Personality Assessment for Students | Educational Use Only</p>
+        <p>Based on the OCEAN model of personality psychology</p>
+    </footer>
+
+    <script src="questions.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
